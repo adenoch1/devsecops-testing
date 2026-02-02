@@ -14,9 +14,9 @@ module "logging" {
   name_prefix = local.name_prefix
   tags        = local.tags
   providers = {
-  aws         = aws
-  aws.replica = aws.replica
-}
+    aws         = aws
+    aws.replica = aws.replica
+  }
 
   alb_log_prefix = var.alb_log_prefix
 
