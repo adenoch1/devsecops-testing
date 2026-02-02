@@ -13,6 +13,11 @@ permissions:
   id-token: write   # REQUIRED for OIDC
   contents: read
 
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  AWS_REGION: "ca-central-1"
+
 jobs:
   validate-scan-policy-plan:
     runs-on: ubuntu-latest
@@ -28,18 +33,21 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.6.6
 
+      # fmt should check ALL terraform files including modules,
+      # so run it from repo root for this one step.
       - name: Terraform fmt (check)
-        run: terraform fmt -check -recursive
+        working-directory: .
+        run: terraform fmt -check -recursive infra
 
       - name: Terraform init
-        run: terraform init -input=false
+        run: terraform init -input=false -reconfigure
 
       - name: Terraform validate
         run: terraform validate
