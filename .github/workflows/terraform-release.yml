@@ -1,0 +1,49 @@
+name: terraform-release
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "infra/**/*.tf"
+      - "infra/**/terraform.tfvars"
+      - ".github/workflows/terraform-release.yml"
+
+permissions:
+  id-token: write   # REQUIRED for OIDC
+  contents: read
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    defaults:
+      run:
+        working-directory: infra/envs/dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform plan (main)
+        run: terraform plan -input=false -out=tfplan.binary
+
+      - name: Terraform apply (after approval)
+        run: terraform apply -input=false -auto-approve tfplan.binary
+
+      - name: Terraform state list (proof)
+        run: terraform state list

@@ -1,0 +1,109 @@
+name: CI-CD-DevSecOps-Project1
+
+on:
+  workflow_dispatch:
+  # push:
+    # branches: [ "main" ]
+  # pull_request:
+    # branches: [ "main" ]
+
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+
+jobs:
+
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r app/requirements.txt
+
+      - name: Run tests
+        run: pytest -q app/tests
+
+
+  security-scans:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install security tools
+        run: |
+          pip install bandit pip-audit
+
+      # ✔ STRICT — FAIL IF ANY SECURITY ISSUE FOUND
+      - name: Bandit (Static Application Security Testing)
+        run: bandit -r app -ll
+
+      # ✔ STRICT — FAIL IF ANY DEPENDENCY VULN FOUND
+      - name: pip-audit (Dependency Vulnerabilities)
+        run: pip-audit -r app/requirements.txt
+
+
+  docker-build-and-scan:
+    runs-on: ubuntu-latest
+    needs: security-scans
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          load: true
+          tags: devsecops-project1:latest
+
+      # ✔ STRICT — FAIL IF ANY OS OR LIBRARY VULNERABILITY
+      - name: Trivy Scan (Filesystem + Dependencies)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "table"
+          exit-code: "1"       # <-- FAIL PIPELINE IF ANY ISSUE FOUND
+          ignore-unfixed: false
+          vuln-type: "os,library"
+
+      # ✔ STRICT — FAIL IF ANY DOCKER IMAGE VULNERABILITY
+      - name: Trivy Image Scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: "devsecops-project1:latest"
+          format: "table"
+          exit-code: "1"
+          ignore-unfixed: false
+          vuln-type: "os,library"
