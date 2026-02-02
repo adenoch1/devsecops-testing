@@ -16,21 +16,12 @@ resource "aws_cloudwatch_log_group" "app" {
 # -----------------------------
 # Security Groups
 # -----------------------------
-#tfsec:ignore:aws-ec2-no-public-ingress-sgr
-#tfsec:ignore:aws-ec2-no-public-egress-sgr
+
+# ALB SG: HTTPS only (no public port 80) to satisfy CKV_AWS_260
 resource "aws_security_group" "alb" {
   name        = "${var.name_prefix}-alb-sg"
   description = "ALB security group"
   vpc_id      = var.vpc_id
-
-  ingress {
-    description      = "HTTP from internet (redirects to HTTPS)"
-    from_port        = 80
-    to_port          = 80
-    protocol         = "tcp"
-    cidr_blocks      = ["0.0.0.0/0"]
-    ipv6_cidr_blocks = ["::/0"]
-  }
 
   ingress {
     description      = "HTTPS from internet"
@@ -41,20 +32,12 @@ resource "aws_security_group" "alb" {
     ipv6_cidr_blocks = ["::/0"]
   }
 
-  egress {
-    description = "All outbound"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-alb-sg"
   })
 }
 
-#tfsec:ignore:aws-ec2-no-public-egress-sgr
+# ECS tasks SG: inbound only from ALB on app port
 resource "aws_security_group" "ecs" {
   name        = "${var.name_prefix}-ecs-sg"
   description = "ECS tasks security group"
@@ -68,23 +51,37 @@ resource "aws_security_group" "ecs" {
     security_groups = [aws_security_group.alb.id]
   }
 
-  egress {
-    description = "All outbound"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-ecs-sg"
   })
 }
 
+# ALB egress: only to ECS tasks SG on app port (fix CKV_AWS_382)
+resource "aws_security_group_rule" "alb_to_ecs_app_port" {
+  type                     = "egress"
+  description              = "ALB to ECS tasks on app port"
+  security_group_id        = aws_security_group.alb.id
+  from_port                = var.app_port
+  to_port                  = var.app_port
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.ecs.id
+}
+
+# ECS tasks egress: only HTTPS outbound (fix CKV_AWS_382)
+# (Add more explicit egress rules later if your app needs them.)
+resource "aws_security_group_rule" "ecs_egress_https" {
+  type              = "egress"
+  description       = "ECS tasks outbound HTTPS only"
+  security_group_id = aws_security_group.ecs.id
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+}
+
 # -----------------------------
 # Application Load Balancer (HTTPS enforced)
 # -----------------------------
-#tfsec:ignore:aws-elb-alb-not-public
 resource "aws_lb" "this" {
   name                       = "${var.name_prefix}-alb"
   load_balancer_type         = "application"
@@ -92,6 +89,9 @@ resource "aws_lb" "this" {
   security_groups            = [aws_security_group.alb.id]
   subnets                    = var.public_subnet_ids
   drop_invalid_header_fields = true
+
+  # CKV_AWS_150
+  enable_deletion_protection = true
 
   access_logs {
     bucket  = var.alb_log_bucket_name
@@ -125,23 +125,6 @@ resource "aws_lb_target_group" "app" {
   })
 }
 
-# HTTP listener redirects to HTTPS
-resource "aws_lb_listener" "http" {
-  load_balancer_arn = aws_lb.this.arn
-  port              = 80
-  protocol          = "HTTP"
-
-  default_action {
-    type = "redirect"
-
-    redirect {
-      port        = "443"
-      protocol    = "HTTPS"
-      status_code = "HTTP_301"
-    }
-  }
-}
-
 # HTTPS listener forwards to target group
 resource "aws_lb_listener" "https" {
   load_balancer_arn = aws_lb.this.arn
@@ -154,6 +137,51 @@ resource "aws_lb_listener" "https" {
     type             = "forward"
     target_group_arn = aws_lb_target_group.app.arn
   }
+}
+
+# -----------------------------
+# WAFv2 (CKV2_AWS_28)
+# -----------------------------
+resource "aws_wafv2_web_acl" "this" {
+  name  = "${var.name_prefix}-waf"
+  scope = "REGIONAL"
+
+  default_action { allow {} }
+
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name                = "${var.name_prefix}-waf"
+    sampled_requests_enabled   = true
+  }
+
+  rule {
+    name     = "AWSManagedRulesCommonRuleSet"
+    priority = 1
+
+    override_action { none {} }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesCommonRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "CommonRuleSet"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-waf"
+  })
+}
+
+resource "aws_wafv2_web_acl_association" "alb" {
+  resource_arn = aws_lb.this.arn
+  web_acl_arn  = aws_wafv2_web_acl.this.arn
 }
 
 # -----------------------------
@@ -207,7 +235,7 @@ resource "aws_ecs_task_definition" "this" {
         logDriver = "awslogs"
         options = {
           awslogs-group         = aws_cloudwatch_log_group.app.name
-          awslogs-region        = data.aws_region.current.id
+          awslogs-region        = data.aws_region.current.name
           awslogs-stream-prefix = "ecs"
         }
       }
