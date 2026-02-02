@@ -16,8 +16,6 @@ resource "aws_cloudwatch_log_group" "app" {
 # -----------------------------
 # Security Groups
 # -----------------------------
-
-# ALB SG: HTTPS only (no public port 80) to satisfy CKV_AWS_260
 resource "aws_security_group" "alb" {
   name        = "${var.name_prefix}-alb-sg"
   description = "ALB security group"
@@ -37,7 +35,6 @@ resource "aws_security_group" "alb" {
   })
 }
 
-# ECS tasks SG: inbound only from ALB on app port
 resource "aws_security_group" "ecs" {
   name        = "${var.name_prefix}-ecs-sg"
   description = "ECS tasks security group"
@@ -56,7 +53,7 @@ resource "aws_security_group" "ecs" {
   })
 }
 
-# ALB egress: only to ECS tasks SG on app port (fix CKV_AWS_382)
+# ALB egress: only to ECS tasks on app port
 resource "aws_security_group_rule" "alb_to_ecs_app_port" {
   type                     = "egress"
   description              = "ALB to ECS tasks on app port"
@@ -67,8 +64,7 @@ resource "aws_security_group_rule" "alb_to_ecs_app_port" {
   source_security_group_id = aws_security_group.ecs.id
 }
 
-# ECS tasks egress: only HTTPS outbound (fix CKV_AWS_382)
-# (Add more explicit egress rules later if your app needs them.)
+# ECS tasks egress: HTTPS only
 resource "aws_security_group_rule" "ecs_egress_https" {
   type              = "egress"
   description       = "ECS tasks outbound HTTPS only"
@@ -90,7 +86,6 @@ resource "aws_lb" "this" {
   subnets                    = var.public_subnet_ids
   drop_invalid_header_fields = true
 
-  # CKV_AWS_150
   enable_deletion_protection = true
 
   access_logs {
@@ -125,7 +120,6 @@ resource "aws_lb_target_group" "app" {
   })
 }
 
-# HTTPS listener forwards to target group
 resource "aws_lb_listener" "https" {
   load_balancer_arn = aws_lb.this.arn
   port              = 443
@@ -140,13 +134,15 @@ resource "aws_lb_listener" "https" {
 }
 
 # -----------------------------
-# WAFv2 (CKV2_AWS_28)
+# WAFv2 (proper Terraform syntax)
 # -----------------------------
 resource "aws_wafv2_web_acl" "this" {
   name  = "${var.name_prefix}-waf"
   scope = "REGIONAL"
 
-  default_action { allow {} }
+  default_action {
+    allow {}
+  }
 
   visibility_config {
     cloudwatch_metrics_enabled = true
@@ -158,7 +154,9 @@ resource "aws_wafv2_web_acl" "this" {
     name     = "AWSManagedRulesCommonRuleSet"
     priority = 1
 
-    override_action { none {} }
+    override_action {
+      none {}
+    }
 
     statement {
       managed_rule_group_statement {
