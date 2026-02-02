@@ -1,0 +1,83 @@
+name: terraform-security
+
+on:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "infra/**/*.tf"
+      - "infra/**/terraform.tfvars"
+      - "policy/**"
+      - ".github/workflows/terraform-security.yml"
+
+permissions:
+  id-token: write   # REQUIRED for OIDC
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  AWS_REGION: "ca-central-1"
+
+jobs:
+  validate-scan-policy-plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/envs/dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      # fmt should check ALL terraform files including modules,
+      # so run it from repo root for this one step.
+      - name: Terraform fmt (check)
+        working-directory: .
+        run: terraform fmt -check -recursive infra
+
+      - name: Terraform init
+        run: terraform init -input=false -reconfigure
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: tfsec (IaC security scan)
+        uses: aquasecurity/tfsec-action@v1.0.3
+        with:
+          soft_fail: false
+          working_directory: infra/envs/dev
+
+      - name: checkov (IaC policy scan)
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: infra/envs/dev
+          framework: terraform
+          quiet: true
+          soft_fail: false
+
+      - name: Terraform plan
+        run: terraform plan -input=false -out=tfplan.binary
+
+      - name: Terraform show (json)
+        run: terraform show -json tfplan.binary > tfplan.json
+
+      - name: Install Conftest
+        run: |
+          wget -qO conftest.tar.gz https://github.com/open-policy-agent/conftest/releases/download/v0.50.0/conftest_0.50.0_Linux_x86_64.tar.gz
+          tar -xzf conftest.tar.gz conftest
+          sudo mv conftest /usr/local/bin/conftest
+          conftest --version
+
+      - name: Conftest Policy Gate (OPA)
+        run: conftest test tfplan.json -p ../../policy/conftest --all-namespaces
