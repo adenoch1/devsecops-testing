@@ -1,40 +1,5 @@
 data "aws_caller_identity" "current" {}
 
-resource "aws_ecr_repository" "this" {
-  name                 = "${var.name_prefix}-repo"
-  image_tag_mutability = "IMMUTABLE"
-  force_delete         = true
-
-  image_scanning_configuration {
-    scan_on_push = true
-  }
-
-  tags = merge(var.tags, {
-    Name = "${var.name_prefix}-ecr"
-  })
-}
-
-resource "aws_ecr_lifecycle_policy" "this" {
-  repository = aws_ecr_repository.this.name
-
-  policy = jsonencode({
-    rules = [
-      {
-        rulePriority = 1
-        description  = "Keep last 20 images"
-        selection = {
-          tagStatus   = "any"
-          countType   = "imageCountMoreThan"
-          countNumber = 20
-        }
-        action = {
-          type = "expire"
-        }
-      }
-    ]
-  })
-}
-
 resource "aws_kms_key" "ecr" {
   description             = "CMK for ECR (${var.name_prefix})"
   deletion_window_in_days = 7
@@ -44,16 +9,18 @@ resource "aws_kms_key" "ecr" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "EnableRootPermissions"
-        Effect   = "Allow"
+        Sid       = "EnableRootPermissions"
+        Effect    = "Allow"
         Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
-        Action   = "kms:*"
-        Resource = "*"
+        Action    = "kms:*"
+        Resource  = "*"
       }
     ]
   })
 
-  tags = merge(var.tags, { Name = "${var.name_prefix}-ecr-kms" })
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-ecr-kms"
+  })
 }
 
 resource "aws_kms_alias" "ecr" {
@@ -75,5 +42,7 @@ resource "aws_ecr_repository" "this" {
     scan_on_push = true
   }
 
-  tags = merge(var.tags, { Name = "${var.name_prefix}-ecr" })
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-ecr"
+  })
 }
