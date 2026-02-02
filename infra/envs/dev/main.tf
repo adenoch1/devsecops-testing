@@ -13,24 +13,20 @@ module "logging" {
   source      = "../../modules/logging"
   name_prefix = local.name_prefix
   tags        = local.tags
+  providers = {
+  aws         = aws
+  aws.replica = aws.replica
+}
 
   alb_log_prefix = var.alb_log_prefix
 
-  # Security hardening controls (these should exist as variables in the logging module)
   lifecycle_expire_days  = var.lifecycle_expire_days
   lifecycle_glacier_days = var.lifecycle_glacier_days
 
-  # Replication is OPTIONAL (set replication_enabled=false in tfvars if you don't want it)
   replication_enabled = var.replication_enabled
   replication_region  = var.replication_region
-
-  # Only needed if your logging module uses aws.replica provider for replication resources.
-  # Keep this if you have provider "aws" { alias = "replica" ... } in providers.tf
-  providers = {
-    aws         = aws
-    aws.replica = aws.replica
-  }
 }
+
 
 module "network" {
   source      = "../../modules/network"
@@ -75,7 +71,6 @@ module "ecs" {
   task_cpu      = var.task_cpu
   task_memory   = var.task_memory
 
-  # Week 3 hardening
   acm_certificate_arn         = var.acm_certificate_arn
   alb_log_bucket_name         = module.logging.alb_logs_bucket_name
   alb_log_prefix              = var.alb_log_prefix
