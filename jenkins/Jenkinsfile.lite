@@ -1,0 +1,111 @@
+pipeline {
+  agent any
+
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+    timeout(time: 20, unit: 'MINUTES')
+  }
+
+  environment {
+    VENV = "${WORKSPACE}/venv"
+    APP_NAME = "devsecops-project1"
+
+    // Traceable tag (git sha)
+    GIT_SHA = ""
+    IMAGE_TAG = ""
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+        script {
+          env.GIT_SHA = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+          env.IMAGE_TAG = "${env.GIT_SHA}"
+          echo "Using IMAGE_TAG=${env.IMAGE_TAG}"
+        }
+      }
+    }
+
+    stage('Setup + Install') {
+      steps {
+        sh '''
+          python3 -m venv "$VENV"
+          . "$VENV/bin/activate"
+          pip install --upgrade pip
+          pip install -r app/requirements.txt
+          pip install pytest bandit pip-audit
+        '''
+      }
+    }
+
+    stage('Test') {
+      steps {
+        sh '''
+          . "$VENV/bin/activate"
+          pytest -q
+        '''
+      }
+    }
+
+    stage('Security (Code + Deps)') {
+      steps {
+        sh '''
+          . "$VENV/bin/activate"
+
+          # SAST
+          bandit -r app -ll
+
+          # Dependency vulnerabilities
+          pip-audit -r app/requirements.txt
+        '''
+      }
+    }
+
+    stage('Docker Build (Local)') {
+      steps {
+        sh '''
+          docker build \
+            -t "$APP_NAME:latest" \
+            -t "$APP_NAME:$IMAGE_TAG" \
+            -f docker/Dockerfile .
+        '''
+      }
+    }
+
+    // OPTIONAL (leave commented until you are ready for registry)
+    /*
+    stage('Push to Registry') {
+      when { branch 'main' }
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'container-registry-creds',
+                                          usernameVariable: 'REG_USER',
+                                          passwordVariable: 'REG_PASS')]) {
+          sh '''
+            REGISTRY="ghcr.io"
+            IMAGE="ghcr.io/your-org-or-user/$APP_NAME"
+
+            echo "$REG_PASS" | docker login "$REGISTRY" -u "$REG_USER" --password-stdin
+
+            docker tag "$APP_NAME:$IMAGE_TAG" "$IMAGE:$IMAGE_TAG"
+            docker tag "$APP_NAME:latest" "$IMAGE:latest"
+
+            docker push "$IMAGE:$IMAGE_TAG"
+            docker push "$IMAGE:latest"
+
+            docker logout "$REGISTRY"
+          '''
+        }
+      }
+    }
+    */
+  }
+
+  post {
+    always {
+      echo "Pipeline Completed: ${currentBuild.currentResult}"
+      sh 'rm -rf "$VENV" || true'
+    }
+  }
+}
