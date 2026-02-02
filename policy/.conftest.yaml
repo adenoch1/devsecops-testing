@@ -1,0 +1,7 @@
+policy:
+  - "policy/conftest"
+data: []
+output: table
+trace: false
+
+# Only run on terraform plan JSON (we will generate it in CI)

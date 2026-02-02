@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Portfolio</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+
+<header class="site-header">
+    <h1>Enoch Adekanye</h1>
+    <img src="{{ url_for('static', filename='images/Me.jpg') }}"
+         alt="Portrait of Enoch"
+         class="profile-pic">
+</header>
+
+<main>
+
+    <section class="content-section">
+        <h2>About Me</h2>
+        <p>I am a DevOps engineer focused on cloud infrastructure, automation, and scalable systems.</p>
+    </section>
+
+    <section class="content-section">
+        <h2>Skills</h2>
+        <ul class="skills-list">
+            <li>HTML</li>
+            <li>Python</li>
+            <li>AWS</li>
+            <li>Terraform</li>
+            <li>CloudFormation</li>
+            <li>AWS CDK</li>
+            <li>Linux</li>
+            <li>Docker</li>
+            <li>Kubernetes</li>
+            <li>Jenkins CI/CD</li>
+            <li>Git & GitHub</li>
+            <li>Network Engineering</li>
+        </ul>
+    </section>
+
+    <section class="content-section">
+        <h2>Contact</h2>
+
+        <form class="contact-form" method="post" action="/contact">
+            <input type="text" name="name" placeholder="Your name" required>
+            <input type="email" name="email" placeholder="Your email" required>
+            <textarea name="message" placeholder="Message" rows="5" required></textarea>
+            <button type="submit">Send</button>
+        </form>
+
+    </section>
+
+</main>
+
+<footer class="site-footer">
+    <p>© 2025 Enoch Adekanye</p>
+</footer>
+
+</body>
+</html>
