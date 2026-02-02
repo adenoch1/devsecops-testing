@@ -64,7 +64,7 @@ resource "aws_security_group_rule" "alb_to_ecs_app_port" {
   source_security_group_id = aws_security_group.ecs.id
 }
 
-# ECS tasks egress: HTTPS only
+# ECS tasks egress: HTTPS only (for pulling images, talking to AWS APIs, etc.)
 resource "aws_security_group_rule" "ecs_egress_https" {
   type              = "egress"
   description       = "ECS tasks outbound HTTPS only"
@@ -134,8 +134,20 @@ resource "aws_lb_listener" "https" {
 }
 
 # -----------------------------
-# WAFv2 (proper Terraform syntax)
+# WAFv2 (with Log4j/AMR coverage + Logging)
 # -----------------------------
+
+# CloudWatch log group for WAF logs (satisfies WAF logging requirement)
+resource "aws_cloudwatch_log_group" "waf" {
+  name              = "/aws/wafv2/${var.name_prefix}"
+  retention_in_days = var.log_retention_days
+  kms_key_id        = var.cloudwatch_logs_kms_key_arn
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-waf-logs"
+  })
+}
+
 resource "aws_wafv2_web_acl" "this" {
   name  = "${var.name_prefix}-waf"
   scope = "REGIONAL"
@@ -150,6 +162,7 @@ resource "aws_wafv2_web_acl" "this" {
     sampled_requests_enabled   = true
   }
 
+  # Common protections (XSS, size limits, bad bots patterns, etc.)
   rule {
     name     = "AWSManagedRulesCommonRuleSet"
     priority = 1
@@ -172,14 +185,54 @@ resource "aws_wafv2_web_acl" "this" {
     }
   }
 
+  # Known bad inputs (helps satisfy Log4j/AMR-related checks)
+  rule {
+    name     = "AWSManagedRulesKnownBadInputsRuleSet"
+    priority = 2
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesKnownBadInputsRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "KnownBadInputs"
+      sampled_requests_enabled   = true
+    }
+  }
+
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-waf"
   })
 }
 
+# Attach WAF to the ALB
 resource "aws_wafv2_web_acl_association" "alb" {
   resource_arn = aws_lb.this.arn
   web_acl_arn  = aws_wafv2_web_acl.this.arn
+}
+
+# Enable WAF logging (Checkov CKV2_AWS_31)
+resource "aws_wafv2_web_acl_logging_configuration" "this" {
+  resource_arn = aws_wafv2_web_acl.this.arn
+
+  log_destination_configs = [
+    aws_cloudwatch_log_group.waf.arn
+  ]
+
+  # Optional: redact sensitive headers
+  redacted_fields {
+    single_header {
+      name = "authorization"
+    }
+  }
 }
 
 # -----------------------------
@@ -267,7 +320,11 @@ resource "aws_ecs_service" "this" {
     container_port   = var.app_port
   }
 
-  depends_on = [aws_lb_listener.https]
+  depends_on = [
+    aws_lb_listener.https,
+    aws_wafv2_web_acl_association.alb,
+    aws_wafv2_web_acl_logging_configuration.this
+  ]
 
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-service"

@@ -57,6 +57,7 @@ jobs:
         with:
           soft_fail: false
           working_directory: infra/envs/dev
+          additional_args: --tfvars-file terraform.tfvars
 
       - name: checkov (IaC policy scan)
         uses: bridgecrewio/checkov-action@v12
