@@ -81,7 +81,7 @@ resource "aws_security_group_rule" "ecs_egress_https" {
 # -----------------------------
 # Application Load Balancer (HTTPS enforced)
 # -----------------------------
-#checkov:skip=CKV2_AWS_76: "WAFv2 WebACL with AWS Managed Rules is attached in this module; CKV2_AWS_76 can still false-positive depending on graph evaluation."
+#checkov:skip=CKV2_AWS_76: "WAFv2 WebACL with AWS Managed Rules is attached in this module; CKV2_AWS_76 may false-positive due to graph evaluation."
 resource "aws_lb" "this" {
   name               = "${var.name_prefix}-alb"
   load_balancer_type = "application"
