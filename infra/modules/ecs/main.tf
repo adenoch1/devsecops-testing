@@ -1,8 +1,8 @@
 data "aws_region" "current" {}
 
-# ----------------------------------
+# --------------------------------
 # CloudWatch Logs (encrypted with KMS)
-# ----------------------------------
+# --------------------------------
 resource "aws_cloudwatch_log_group" "app" {
   name              = "/ecs/${var.name_prefix}"
   retention_in_days = var.log_retention_days
@@ -102,82 +102,6 @@ resource "aws_lb" "this" {
   })
 }
 
-
-# -----------------------------
-# WAFv2 Web ACL (managed rules)
-# - Satisfies Checkov CKV2_AWS_76 by attaching a WebACL to the ALB
-# - Includes AWS Managed Rules that cover common exploits (including Log4j patterns)
-# -----------------------------
-resource "aws_wafv2_web_acl" "alb" {
-  name  = "${var.name_prefix}-alb-web-acl"
-  scope = "REGIONAL"
-
-  default_action {
-    allow {}
-  }
-
-  # AWS managed rules (Common)
-  rule {
-    name     = "AWSManagedRulesCommonRuleSet"
-    priority = 10
-
-    override_action {
-      none {}
-    }
-
-    statement {
-      managed_rule_group_statement {
-        name        = "AWSManagedRulesCommonRuleSet"
-        vendor_name = "AWS"
-      }
-    }
-
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "${var.name_prefix}-waf-common"
-      sampled_requests_enabled   = true
-    }
-  }
-
-  # AWS managed rules (Known Bad Inputs) - includes protections for known exploit payloads
-  rule {
-    name     = "AWSManagedRulesKnownBadInputsRuleSet"
-    priority = 20
-
-    override_action {
-      none {}
-    }
-
-    statement {
-      managed_rule_group_statement {
-        name        = "AWSManagedRulesKnownBadInputsRuleSet"
-        vendor_name = "AWS"
-      }
-    }
-
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "${var.name_prefix}-waf-knownbad"
-      sampled_requests_enabled   = true
-    }
-  }
-
-  visibility_config {
-    cloudwatch_metrics_enabled = true
-    metric_name                = "${var.name_prefix}-waf"
-    sampled_requests_enabled   = true
-  }
-
-  tags = merge(var.tags, {
-    Name = "${var.name_prefix}-alb-web-acl"
-  })
-}
-
-resource "aws_wafv2_web_acl_association" "alb" {
-  resource_arn = aws_lb.this.arn
-  web_acl_arn  = aws_wafv2_web_acl.alb.arn
-}
-
 resource "aws_lb_target_group" "app" {
   name        = "${var.name_prefix}-tg"
   port        = var.app_port
@@ -213,10 +137,8 @@ resource "aws_lb_listener" "https" {
 }
 
 # -----------------------------
-# WAFv2 (with Log4j/AMR coverage + Logging)
+# WAFv2 (Managed rules + logging)
 # -----------------------------
-
-# CloudWatch log group for WAF logs (satisfies WAF logging requirement)
 resource "aws_cloudwatch_log_group" "waf" {
   name              = "/aws/wafv2/${var.name_prefix}"
   retention_in_days = var.log_retention_days
@@ -241,7 +163,7 @@ resource "aws_wafv2_web_acl" "this" {
     sampled_requests_enabled   = true
   }
 
-  # Common protections (XSS, size limits, bad bots patterns, etc.)
+  # Common protections
   rule {
     name     = "AWSManagedRulesCommonRuleSet"
     priority = 1
@@ -264,7 +186,7 @@ resource "aws_wafv2_web_acl" "this" {
     }
   }
 
-  # Known bad inputs (helps satisfy Log4j/AMR-related checks)
+  # Known bad inputs (helps with Log4j/AMR-related checks)
   rule {
     name     = "AWSManagedRulesKnownBadInputsRuleSet"
     priority = 2
@@ -292,13 +214,12 @@ resource "aws_wafv2_web_acl" "this" {
   })
 }
 
-# Attach WAF to the ALB
+# Attach WAF to the ALB (ONLY ONE association now)
 resource "aws_wafv2_web_acl_association" "alb" {
   resource_arn = aws_lb.this.arn
   web_acl_arn  = aws_wafv2_web_acl.this.arn
 }
 
-# Enable WAF logging (Checkov CKV2_AWS_31)
 resource "aws_wafv2_web_acl_logging_configuration" "this" {
   resource_arn = aws_wafv2_web_acl.this.arn
 
@@ -306,7 +227,6 @@ resource "aws_wafv2_web_acl_logging_configuration" "this" {
     aws_cloudwatch_log_group.waf.arn
   ]
 
-  # Optional: redact sensitive headers
   redacted_fields {
     single_header {
       name = "authorization"
@@ -337,18 +257,16 @@ resource "aws_ecs_task_definition" "this" {
   family                   = "${var.name_prefix}-task"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = tostring(var.task_cpu)
-  memory                   = tostring(var.task_memory)
-
-  execution_role_arn = var.ecs_task_execution_role_arn
-  task_role_arn      = var.ecs_task_role_arn
+  cpu                      = var.task_cpu
+  memory                   = var.task_memory
+  execution_role_arn       = var.ecs_task_execution_role_arn
+  task_role_arn            = var.ecs_task_role_arn
 
   container_definitions = jsonencode([
     {
       name      = "app"
       image     = "${var.ecr_repository_url}:${var.container_image_tag}"
       essential = true
-
       portMappings = [
         {
           containerPort = var.app_port
@@ -356,24 +274,19 @@ resource "aws_ecs_task_definition" "this" {
           protocol      = "tcp"
         }
       ]
-
-      environment = [
-        { name = "FLASK_ENV", value = "production" }
-      ]
-
       logConfiguration = {
         logDriver = "awslogs"
         options = {
           awslogs-group         = aws_cloudwatch_log_group.app.name
-          awslogs-region        = data.aws_region.current.id
-          awslogs-stream-prefix = "ecs"
+          awslogs-region        = data.aws_region.current.name
+          awslogs-stream-prefix = "app"
         }
       }
     }
   ])
 
   tags = merge(var.tags, {
-    Name = "${var.name_prefix}-taskdef"
+    Name = "${var.name_prefix}-task"
   })
 }
 
@@ -399,13 +312,14 @@ resource "aws_ecs_service" "this" {
     container_port   = var.app_port
   }
 
-  depends_on = [
-    aws_lb_listener.https,
-    aws_wafv2_web_acl_association.alb,
-    aws_wafv2_web_acl_logging_configuration.this
-  ]
+  depends_on = [aws_lb_listener.https]
 
   tags = merge(var.tags, {
-    Name = "${var.name_prefix}-service"
+    Name = "${var.name_prefix}-svc"
   })
+}
+
+output "alb_dns_name" {
+  value       = aws_lb.this.dns_name
+  description = "Public DNS name of the ALB"
 }
