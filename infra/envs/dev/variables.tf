@@ -2,7 +2,6 @@ variable "aws_region" {
   type        = string
   description = "Primary AWS region"
 }
-##
 
 variable "project" {
   type        = string
