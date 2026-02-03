@@ -52,19 +52,20 @@ jobs:
       - name: Terraform validate
         run: terraform validate
 
-      # IMPORTANT:
-      # tfsec-action runs inside a container in some setups.
-      # Relative paths can break. Absolute paths must start with "/" (e.g. /github/workspace/...).
-      # We create a tfvars file in the repo root so it's guaranteed to exist inside the container mount.
-      - name: Ensure tfsec tfvars file exists (container-safe)
+      # Fix for tfsec tfvars issue:
+      # - DO NOT write to /github (permission denied on runner)
+      # - Create a temp tfvars file INSIDE the checked-out workspace
+      # - Pass an ABSOLUTE path based on $GITHUB_WORKSPACE (with leading "/")
+      - name: Prepare tfsec tfvars file (workspace-safe)
+        id: tfsec_tfvars
         shell: bash
         working-directory: .
         run: |
-          TFVARS="/github/workspace/terraform.tfvars"
-          echo "Creating ${TFVARS} so tfsec never fails loading tfvars..."
-          mkdir -p /github/workspace
-          touch /github/workspace/terraform.tfvars
-          ls -la /github/workspace
+          TFVARS_FILE="${GITHUB_WORKSPACE}/.tfsec.auto.tfvars"
+          echo "# auto-generated for tfsec in CI" > "${TFVARS_FILE}"
+          echo "created_path=${TFVARS_FILE}" >> "$GITHUB_OUTPUT"
+          echo "Created: ${TFVARS_FILE}"
+          ls -la "${TFVARS_FILE}"
 
       - name: tfsec (IaC security scan)
         uses: aquasecurity/tfsec-action@v1.0.3
@@ -72,7 +73,7 @@ jobs:
           working_directory: infra/envs/dev
           soft_fail: true
           additional_args: |
-            --tfvars-file "/github/workspace/terraform.tfvars"
+            --tfvars-file "${{ steps.tfsec_tfvars.outputs.created_path }}"
 
       - name: checkov (IaC policy scan)
         uses: bridgecrewio/checkov-action@v12
