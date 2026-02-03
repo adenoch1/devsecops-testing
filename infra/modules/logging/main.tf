@@ -253,8 +253,8 @@ resource "aws_kms_key" "sqs_sse" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "EnableRootPermissions"
-        Effect   = "Allow"
+        Sid    = "EnableRootPermissions"
+        Effect = "Allow"
         Principal = {
           AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
         }
@@ -262,8 +262,8 @@ resource "aws_kms_key" "sqs_sse" {
         Resource = "*"
       },
       {
-        Sid      = "AllowSQSUseOfTheKey"
-        Effect   = "Allow"
+        Sid    = "AllowSQSUseOfTheKey"
+        Effect = "Allow"
         Principal = {
           Service = "sqs.amazonaws.com"
         }
