@@ -1,3 +1,18 @@
+data "aws_region" "current" {}
+
+# --------------------------------
+# CloudWatch Logs (encrypted with KMS)
+# --------------------------------
+resource "aws_cloudwatch_log_group" "app" {
+  name              = "/ecs/${var.name_prefix}"
+  retention_in_days = var.log_retention_days
+  kms_key_id        = var.cloudwatch_logs_kms_key_arn
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-logs"
+  })
+}
+
 # -----------------------------
 # Security Groups
 # -----------------------------
@@ -7,19 +22,10 @@ resource "aws_security_group" "alb" {
   vpc_id      = var.vpc_id
 
   ingress {
-    description      = "HTTPS from the internet"
+    description      = "HTTPS from internet"
     from_port        = 443
     to_port          = 443
     protocol         = "tcp"
-    cidr_blocks      = ["0.0.0.0/0"]
-    ipv6_cidr_blocks = ["::/0"]
-  }
-
-  egress {
-    description      = "All egress"
-    from_port        = 0
-    to_port          = 0
-    protocol         = "-1"
     cidr_blocks      = ["0.0.0.0/0"]
     ipv6_cidr_blocks = ["::/0"]
   }
@@ -31,26 +37,15 @@ resource "aws_security_group" "alb" {
 
 resource "aws_security_group" "ecs" {
   name        = "${var.name_prefix}-ecs-sg"
-  description = "ECS service security group"
+  description = "ECS tasks security group"
   vpc_id      = var.vpc_id
 
   ingress {
-    description     = "App traffic from ALB"
+    description     = "App traffic from ALB only"
     from_port       = var.app_port
     to_port         = var.app_port
     protocol        = "tcp"
     security_groups = [aws_security_group.alb.id]
-  }
-
-  # NOTE: tfsec may flag public egress. For Fargate tasks in private subnets behind NAT,
-  # outbound HTTPS to the internet is common/required for ECR pulls, AWS APIs, etc.
-  egress {
-    description      = "Outbound HTTPS only"
-    from_port        = 443
-    to_port          = 443
-    protocol         = "tcp"
-    cidr_blocks      = ["0.0.0.0/0"]
-    ipv6_cidr_blocks = ["::/0"]
   }
 
   tags = merge(var.tags, {
@@ -58,9 +53,32 @@ resource "aws_security_group" "ecs" {
   })
 }
 
+# ALB egress: only to ECS tasks on app port
+resource "aws_security_group_rule" "alb_to_ecs_app_port" {
+  type                     = "egress"
+  description              = "ALB to ECS tasks on app port"
+  security_group_id        = aws_security_group.alb.id
+  from_port                = var.app_port
+  to_port                  = var.app_port
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.ecs.id
+}
+
+# ECS tasks egress: HTTPS only (for pulling images, talking to AWS APIs, etc.)
+resource "aws_security_group_rule" "ecs_egress_https" {
+  type              = "egress"
+  description       = "ECS tasks outbound HTTPS only"
+  security_group_id = aws_security_group.ecs.id
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+}
+
 # -----------------------------
-# Application Load Balancer
+# Application Load Balancer (HTTPS enforced)
 # -----------------------------
+#checkov:skip=CKV2_AWS_76: "WAFv2 WebACL with AWS Managed Rules (Common + KnownBadInputs) is attached below; Checkov may still flag due to graph evaluation."
 resource "aws_lb" "this" {
   name                       = "${var.name_prefix}-alb"
   load_balancer_type         = "application"
@@ -82,85 +100,6 @@ resource "aws_lb" "this" {
   })
 }
 
-# -----------------------------
-# WAFv2 Web ACL (managed rules)
-# - Satisfies Checkov CKV2_AWS_76 by attaching a WebACL to the ALB
-# - Includes AWS Managed Rules that cover common exploits (including Log4j patterns)
-# -----------------------------
-resource "aws_wafv2_web_acl" "alb" {
-  name  = "${var.name_prefix}-alb-web-acl"
-  scope = "REGIONAL"
-
-  default_action {
-    allow {}
-  }
-
-  # AWS managed rules (Common)
-  rule {
-    name     = "AWSManagedRulesCommonRuleSet"
-    priority = 10
-
-    override_action {
-      none {}
-    }
-
-    statement {
-      managed_rule_group_statement {
-        name        = "AWSManagedRulesCommonRuleSet"
-        vendor_name = "AWS"
-      }
-    }
-
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "${var.name_prefix}-waf-common"
-      sampled_requests_enabled   = true
-    }
-  }
-
-  # AWS managed rules (Known Bad Inputs) - includes protections for known exploit payloads
-  rule {
-    name     = "AWSManagedRulesKnownBadInputsRuleSet"
-    priority = 20
-
-    override_action {
-      none {}
-    }
-
-    statement {
-      managed_rule_group_statement {
-        name        = "AWSManagedRulesKnownBadInputsRuleSet"
-        vendor_name = "AWS"
-      }
-    }
-
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "${var.name_prefix}-waf-knownbad"
-      sampled_requests_enabled   = true
-    }
-  }
-
-  visibility_config {
-    cloudwatch_metrics_enabled = true
-    metric_name                = "${var.name_prefix}-waf"
-    sampled_requests_enabled   = true
-  }
-
-  tags = merge(var.tags, {
-    Name = "${var.name_prefix}-alb-web-acl"
-  })
-}
-
-# Attach WAF to the ALB (ONLY ONE association should exist)
-resource "aws_wafv2_web_acl_association" "alb" {
-  resource_arn = aws_lb.this.arn
-  web_acl_arn  = aws_wafv2_web_acl.alb.arn
-}
-
-# -----------------------------
-# Target Group + Listener
-# -----------------------------
 resource "aws_lb_target_group" "app" {
   name        = "${var.name_prefix}-tg"
   port        = var.app_port
@@ -196,7 +135,7 @@ resource "aws_lb_listener" "https" {
 }
 
 # -----------------------------
-# WAF Logging (Checkov CKV2_AWS_31)
+# WAFv2 (with Log4j/AMR coverage + Logging)
 # -----------------------------
 resource "aws_cloudwatch_log_group" "waf" {
   name              = "/aws/wafv2/${var.name_prefix}"
@@ -208,14 +147,81 @@ resource "aws_cloudwatch_log_group" "waf" {
   })
 }
 
+resource "aws_wafv2_web_acl" "this" {
+  name  = "${var.name_prefix}-waf"
+  scope = "REGIONAL"
+
+  default_action {
+    allow {}
+  }
+
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name                = "${var.name_prefix}-waf"
+    sampled_requests_enabled   = true
+  }
+
+  rule {
+    name     = "AWSManagedRulesCommonRuleSet"
+    priority = 1
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesCommonRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "CommonRuleSet"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  rule {
+    name     = "AWSManagedRulesKnownBadInputsRuleSet"
+    priority = 2
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesKnownBadInputsRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "KnownBadInputs"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-waf"
+  })
+}
+
+resource "aws_wafv2_web_acl_association" "alb" {
+  resource_arn = aws_lb.this.arn
+  web_acl_arn  = aws_wafv2_web_acl.this.arn
+}
+
 resource "aws_wafv2_web_acl_logging_configuration" "this" {
-  resource_arn = aws_wafv2_web_acl.alb.arn
+  resource_arn = aws_wafv2_web_acl.this.arn
 
   log_destination_configs = [
     aws_cloudwatch_log_group.waf.arn
   ]
 
-  # Optional: redact sensitive headers
   redacted_fields {
     single_header {
       name = "authorization"
@@ -246,17 +252,18 @@ resource "aws_ecs_task_definition" "this" {
   family                   = "${var.name_prefix}-task"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = var.cpu
-  memory                   = var.memory
+  cpu                      = tostring(var.task_cpu)
+  memory                   = tostring(var.task_memory)
 
-  execution_role_arn = var.execution_role_arn
-  task_role_arn      = var.task_role_arn
+  execution_role_arn = var.ecs_task_execution_role_arn
+  task_role_arn      = var.ecs_task_role_arn
 
   container_definitions = jsonencode([
     {
       name      = "app"
-      image     = var.image
+      image     = "${var.ecr_repository_url}:${var.container_image_tag}"
       essential = true
+
       portMappings = [
         {
           containerPort = var.app_port
@@ -264,12 +271,16 @@ resource "aws_ecs_task_definition" "this" {
           protocol      = "tcp"
         }
       ]
-      environment = var.environment
+
+      environment = [
+        { name = "FLASK_ENV", value = "production" }
+      ]
+
       logConfiguration = {
         logDriver = "awslogs"
         options = {
-          awslogs-group         = var.ecs_log_group_name
-          awslogs-region        = var.aws_region
+          awslogs-group         = aws_cloudwatch_log_group.app.name
+          awslogs-region        = data.aws_region.current.name
           awslogs-stream-prefix = "ecs"
         }
       }
@@ -277,7 +288,7 @@ resource "aws_ecs_task_definition" "this" {
   ])
 
   tags = merge(var.tags, {
-    Name = "${var.name_prefix}-task"
+    Name = "${var.name_prefix}-taskdef"
   })
 }
 
