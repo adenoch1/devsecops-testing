@@ -1,9 +1,20 @@
-############################################
-# ECS + ALB Module
-############################################
+data "aws_region" "current" {}
+
+# --------------------------------
+# CloudWatch Logs (encrypted with KMS)
+# --------------------------------
+resource "aws_cloudwatch_log_group" "app" {
+  name              = "/ecs/${var.name_prefix}"
+  retention_in_days = var.log_retention_days
+  kms_key_id        = var.cloudwatch_logs_kms_key_arn
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-logs"
+  })
+}
 
 # -----------------------------
-# Security Group for ALB
+# Security Groups
 # -----------------------------
 resource "aws_security_group" "alb" {
   name        = "${var.name_prefix}-alb-sg"
@@ -11,20 +22,12 @@ resource "aws_security_group" "alb" {
   vpc_id      = var.vpc_id
 
   ingress {
-    description      = "HTTPS from allowed CIDRs"
+    description      = "HTTPS from internet"
     from_port        = 443
     to_port          = 443
     protocol         = "tcp"
-    cidr_blocks      = var.allowed_ingress_cidrs
-    ipv6_cidr_blocks = var.allowed_ingress_ipv6_cidrs
-  }
-
-  egress {
-    description = "Outbound all (ALB needs health checks / targets / integrations)"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks      = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
   }
 
   tags = merge(var.tags, {
@@ -32,28 +35,17 @@ resource "aws_security_group" "alb" {
   })
 }
 
-# -----------------------------
-# Security Group for ECS tasks
-# -----------------------------
 resource "aws_security_group" "ecs" {
   name        = "${var.name_prefix}-ecs-sg"
   description = "ECS tasks security group"
   vpc_id      = var.vpc_id
 
   ingress {
-    description     = "App port from ALB SG only"
+    description     = "App traffic from ALB only"
     from_port       = var.app_port
     to_port         = var.app_port
     protocol        = "tcp"
     security_groups = [aws_security_group.alb.id]
-  }
-
-  egress {
-    description = "Outbound HTTPS only (tasks)"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
   }
 
   tags = merge(var.tags, {
@@ -61,10 +53,32 @@ resource "aws_security_group" "ecs" {
   })
 }
 
+# ALB egress: only to ECS tasks on app port
+resource "aws_security_group_rule" "alb_to_ecs_app_port" {
+  type                     = "egress"
+  description              = "ALB to ECS tasks on app port"
+  security_group_id        = aws_security_group.alb.id
+  from_port                = var.app_port
+  to_port                  = var.app_port
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.ecs.id
+}
+
+# ECS tasks egress: HTTPS only (for pulling images, talking to AWS APIs, etc.)
+resource "aws_security_group_rule" "ecs_egress_https" {
+  type              = "egress"
+  description       = "ECS tasks outbound HTTPS only"
+  security_group_id = aws_security_group.ecs.id
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+}
+
 # -----------------------------
-# ALB
+# Application Load Balancer (HTTPS enforced)
 # -----------------------------
-#checkov:skip=CKV2_AWS_76: "WAFv2 WebACL with AWS managed rules is attached in this module; CKV2_AWS_76 may false-positive depending on graph evaluation."
+#checkov:skip=CKV2_AWS_76: "WAFv2 WebACL with AWS Managed Rules (Common + KnownBadInputs) is attached below; Checkov may still flag due to graph evaluation."
 resource "aws_lb" "this" {
   name                       = "${var.name_prefix}-alb"
   load_balancer_type         = "application"
@@ -86,10 +100,7 @@ resource "aws_lb" "this" {
   })
 }
 
-# -----------------------------
-# Target Group
-# -----------------------------
-resource "aws_lb_target_group" "this" {
+resource "aws_lb_target_group" "app" {
   name        = "${var.name_prefix}-tg"
   port        = var.app_port
   protocol    = "HTTP"
@@ -98,13 +109,11 @@ resource "aws_lb_target_group" "this" {
 
   health_check {
     enabled             = true
-    path                = var.health_check_path
-    protocol            = "HTTP"
-    matcher             = "200-399"
     interval            = 30
-    timeout             = 5
+    path                = "/health"
     healthy_threshold   = 2
-    unhealthy_threshold = 2
+    unhealthy_threshold = 3
+    matcher             = "200-399"
   }
 
   tags = merge(var.tags, {
@@ -112,9 +121,6 @@ resource "aws_lb_target_group" "this" {
   })
 }
 
-# -----------------------------
-# HTTPS Listener
-# -----------------------------
 resource "aws_lb_listener" "https" {
   load_balancer_arn = aws_lb.this.arn
   port              = 443
@@ -124,29 +130,23 @@ resource "aws_lb_listener" "https" {
 
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.this.arn
+    target_group_arn = aws_lb_target_group.app.arn
   }
-
-  tags = merge(var.tags, {
-    Name = "${var.name_prefix}-https-listener"
-  })
 }
 
 # -----------------------------
-# WAF Log Group
+# WAFv2 (with Log4j/AMR coverage + Logging)
 # -----------------------------
 resource "aws_cloudwatch_log_group" "waf" {
-  name              = "/aws/wafv2/${var.name_prefix}-alb"
+  name              = "/aws/wafv2/${var.name_prefix}"
   retention_in_days = var.log_retention_days
+  kms_key_id        = var.cloudwatch_logs_kms_key_arn
 
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-waf-logs"
   })
 }
 
-# -----------------------------
-# WAFv2 Web ACL
-# -----------------------------
 resource "aws_wafv2_web_acl" "this" {
   name  = "${var.name_prefix}-waf"
   scope = "REGIONAL"
@@ -161,7 +161,6 @@ resource "aws_wafv2_web_acl" "this" {
     sampled_requests_enabled   = true
   }
 
-  # Common protections
   rule {
     name     = "AWSManagedRulesCommonRuleSet"
     priority = 1
@@ -184,7 +183,6 @@ resource "aws_wafv2_web_acl" "this" {
     }
   }
 
-  # Known bad inputs (Log4j-related coverage)
   rule {
     name     = "AWSManagedRulesKnownBadInputsRuleSet"
     priority = 2
@@ -212,13 +210,11 @@ resource "aws_wafv2_web_acl" "this" {
   })
 }
 
-# Attach WAF to the ALB
 resource "aws_wafv2_web_acl_association" "alb" {
   resource_arn = aws_lb.this.arn
   web_acl_arn  = aws_wafv2_web_acl.this.arn
 }
 
-# Enable WAF logging
 resource "aws_wafv2_web_acl_logging_configuration" "this" {
   resource_arn = aws_wafv2_web_acl.this.arn
 
@@ -254,18 +250,20 @@ resource "aws_ecs_cluster" "this" {
 # -----------------------------
 resource "aws_ecs_task_definition" "this" {
   family                   = "${var.name_prefix}-task"
-  network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
-  cpu                      = var.task_cpu
-  memory                   = var.task_memory
-  execution_role_arn       = var.ecs_task_execution_role_arn
-  task_role_arn            = var.ecs_task_role_arn
+  network_mode             = "awsvpc"
+  cpu                      = tostring(var.task_cpu)
+  memory                   = tostring(var.task_memory)
+
+  execution_role_arn = var.ecs_task_execution_role_arn
+  task_role_arn      = var.ecs_task_role_arn
 
   container_definitions = jsonencode([
     {
       name      = "app"
       image     = "${var.ecr_repository_url}:${var.container_image_tag}"
       essential = true
+
       portMappings = [
         {
           containerPort = var.app_port
@@ -273,18 +271,17 @@ resource "aws_ecs_task_definition" "this" {
           protocol      = "tcp"
         }
       ]
+
       environment = [
-        {
-          name  = "ENVIRONMENT"
-          value = var.environment_name
-        }
+        { name = "FLASK_ENV", value = "production" }
       ]
+
       logConfiguration = {
         logDriver = "awslogs"
         options = {
-          awslogs-group         = var.ecs_log_group_name
-          awslogs-region        = var.aws_region
-          awslogs-stream-prefix = "app"
+          awslogs-group         = aws_cloudwatch_log_group.app.name
+          awslogs-region        = data.aws_region.current.name
+          awslogs-stream-prefix = "ecs"
         }
       }
     }
@@ -299,7 +296,7 @@ resource "aws_ecs_task_definition" "this" {
 # ECS Service
 # -----------------------------
 resource "aws_ecs_service" "this" {
-  name            = "${var.name_prefix}-service"
+  name            = "${var.name_prefix}-svc"
   cluster         = aws_ecs_cluster.this.id
   task_definition = aws_ecs_task_definition.this.arn
   desired_count   = var.desired_count
@@ -312,7 +309,7 @@ resource "aws_ecs_service" "this" {
   }
 
   load_balancer {
-    target_group_arn = aws_lb_target_group.this.arn
+    target_group_arn = aws_lb_target_group.app.arn
     container_name   = "app"
     container_port   = var.app_port
   }
