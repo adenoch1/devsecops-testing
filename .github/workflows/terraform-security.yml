@@ -50,7 +50,7 @@ jobs:
         run: terraform init -input=false -reconfigure
 
       - name: Terraform validate
-        run: terraform validate
+        run: terraform validate -no-color
 
       # IMPORTANT:
       # Do NOT pass --tfvars-file to tfsec in GitHub Actions.
@@ -72,7 +72,7 @@ jobs:
           skip_check: CKV2_AWS_76
 
       - name: Terraform plan
-        run: terraform plan -input=false -out=tfplan.binary
+        run: terraform plan -input=false -var-file="terraform.tfvars" -out=tfplan.binary
 
       - name: Terraform show (json)
         run: terraform show -json tfplan.binary > tfplan.json
