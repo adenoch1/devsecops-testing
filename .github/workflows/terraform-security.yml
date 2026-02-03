@@ -64,6 +64,7 @@ jobs:
             --tfvars-file "${{ github.workspace }}/infra/envs/dev/terraform.tfvars" \
             infra/envs/dev
 
+
       - name: checkov (IaC policy scan)
         uses: bridgecrewio/checkov-action@v12
         with:
