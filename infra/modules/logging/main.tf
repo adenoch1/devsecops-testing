@@ -42,8 +42,8 @@ data "aws_iam_policy_document" "kms_key_policy" {
 
   # Allow CloudWatch Logs service to use the key
   statement {
-    sid     = "AllowCloudWatchLogsUseOfTheKey"
-    effect  = "Allow"
+    sid    = "AllowCloudWatchLogsUseOfTheKey"
+    effect = "Allow"
     actions = [
       "kms:Encrypt",
       "kms:Decrypt",
@@ -62,8 +62,8 @@ data "aws_iam_policy_document" "kms_key_policy" {
 
   # Allow S3 to use the key for bucket encryption
   statement {
-    sid     = "AllowS3UseOfTheKey"
-    effect  = "Allow"
+    sid    = "AllowS3UseOfTheKey"
+    effect = "Allow"
     actions = [
       "kms:Encrypt",
       "kms:Decrypt",
