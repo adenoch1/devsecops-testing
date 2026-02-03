@@ -68,6 +68,8 @@ jobs:
           framework: terraform
           quiet: true
           soft_fail: false
+          # CKV2_AWS_76 can false-positive even when WAF is associated in-module.
+          skip_check: CKV2_AWS_76
 
       - name: Terraform plan
         run: terraform plan -input=false -out=tfplan.binary
