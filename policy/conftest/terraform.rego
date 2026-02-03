@@ -1,7 +1,5 @@
 package terraform.security
 
-default deny := []
-
 # -----------------------------
 # Helpers
 # -----------------------------
