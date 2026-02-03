@@ -1,36 +1,16 @@
 variable "name_prefix" {
-  type        = string
   description = "Prefix for naming resources"
+  type        = string
 }
 
 variable "tags" {
+  description = "Common tags applied to resources"
   type        = map(string)
-  description = "Common tags"
+  default     = {}
 }
 
-variable "alb_log_prefix" {
-  type        = string
-  description = "Prefix inside the S3 bucket for ALB access logs (must not contain 'AWSLogs')"
-  default     = "alb-access"
+variable "flow_log_retention_days" {
+  description = "Retention (days) for the VPC flow logs CloudWatch log group"
+  type        = number
+  default     = 365
 }
-
-variable "lifecycle_expire_days" {
-  type    = number
-  default = 365
-}
-
-variable "lifecycle_glacier_days" {
-  type    = number
-  default = 90
-}
-
-variable "replication_enabled" {
-  type    = bool
-  default = true
-}
-
-variable "replication_region" {
-  type    = string
-  default = "us-east-1"
-}
-
