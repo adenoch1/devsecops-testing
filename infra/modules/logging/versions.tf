@@ -4,8 +4,7 @@ terraform {
       source  = "hashicorp/aws"
       version = ">= 5.0"
 
-      # Allows the root module to pass an aliased provider config like:
-      # providers = { aws = aws, aws.replica = aws.replica }
+      # Allow the root module to pass an aliased AWS provider (aws.replica) into this module
       configuration_aliases = [aws.replica]
     }
   }
