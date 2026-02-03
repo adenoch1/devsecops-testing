@@ -10,7 +10,7 @@ on:
       - ".github/workflows/terraform-security.yml"
 
 permissions:
-  id-token: write   # REQUIRED for OIDC
+  id-token: write
   contents: read
 
 env:
@@ -21,6 +21,7 @@ env:
 jobs:
   validate-scan-policy-plan:
     runs-on: ubuntu-latest
+
     defaults:
       run:
         working-directory: infra/envs/dev
@@ -41,8 +42,7 @@ jobs:
           terraform_version: 1.6.6
 
       - name: Terraform fmt (check)
-        working-directory: .
-        run: terraform fmt -check -recursive infra
+        run: terraform fmt -check -recursive ../../
 
       - name: Terraform init
         run: terraform init -input=false -reconfigure
@@ -53,11 +53,8 @@ jobs:
       - name: tfsec (IaC security scan)
         uses: aquasecurity/tfsec-action@v1.0.3
         with:
-          # Scan the env we actually plan/apply
           working_directory: infra/envs/dev
-          # Match your previous "--soft-fail" behavior (doesn't break PR on findings)
           soft_fail: true
-          # Pass tfvars so tfsec can evaluate variable-driven settings
           additional_args: |
             --tfvars-file "${{ github.workspace }}/infra/envs/dev/terraform.tfvars"
 
@@ -83,3 +80,4 @@ jobs:
           conftest --version
 
       - name: Conftest Policy Gate (OPA)
+        run: conftest test tfplan.json -p ../../policy/conftest --all-namespaces
