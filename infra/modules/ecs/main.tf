@@ -163,7 +163,6 @@ resource "aws_wafv2_web_acl" "this" {
     sampled_requests_enabled   = true
   }
 
-  # Common protections
   rule {
     name     = "AWSManagedRulesCommonRuleSet"
     priority = 1
@@ -186,7 +185,6 @@ resource "aws_wafv2_web_acl" "this" {
     }
   }
 
-  # Known bad inputs (helps with Log4j/AMR-related checks)
   rule {
     name     = "AWSManagedRulesKnownBadInputsRuleSet"
     priority = 2
@@ -214,7 +212,6 @@ resource "aws_wafv2_web_acl" "this" {
   })
 }
 
-# Attach WAF to the ALB (ONLY ONE association now)
 resource "aws_wafv2_web_acl_association" "alb" {
   resource_arn = aws_lb.this.arn
   web_acl_arn  = aws_wafv2_web_acl.this.arn
@@ -317,9 +314,4 @@ resource "aws_ecs_service" "this" {
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-svc"
   })
-}
-
-output "alb_dns_name" {
-  value       = aws_lb.this.dns_name
-  description = "Public DNS name of the ALB"
 }
