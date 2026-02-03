@@ -17,7 +17,6 @@ resource "aws_cloudwatch_log_group" "app" {
 # Security Groups
 # -----------------------------
 
-# tfsec flags public ingress, but for a public HTTPS ALB this is expected.
 #tfsec:ignore:aws-ec2-no-public-ingress-sgr
 resource "aws_security_group" "alb" {
   name        = "${var.name_prefix}-alb-sg"
@@ -82,9 +81,8 @@ resource "aws_security_group_rule" "ecs_egress_https" {
 # -----------------------------
 # Application Load Balancer (HTTPS enforced)
 # -----------------------------
-# tfsec flags public ALB; for a public-facing app this is expected.
 #tfsec:ignore:aws-elb-alb-not-public
-#checkov:skip=CKV2_AWS_76: "Web ACL with AWS Managed Rules is attached below; CKV2_AWS_76 can still fail due to graph evaluation ordering."
+#checkov:skip=CKV2_AWS_76: "WAFv2 WebACL with AWS Managed Rules is attached in this module; Checkov may still flag due to graph evaluation."
 resource "aws_lb" "this" {
   name                       = "${var.name_prefix}-alb"
   load_balancer_type         = "application"
@@ -141,7 +139,7 @@ resource "aws_lb_listener" "https" {
 }
 
 # -----------------------------
-# WAFv2 (Log4j coverage + Logging)
+# WAFv2 (Log4j/AMR coverage + Logging)
 # -----------------------------
 resource "aws_cloudwatch_log_group" "waf" {
   name              = "/aws/wafv2/${var.name_prefix}"
