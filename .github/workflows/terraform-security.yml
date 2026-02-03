@@ -40,8 +40,6 @@ jobs:
         with:
           terraform_version: 1.6.6
 
-      # fmt should check ALL terraform files including modules,
-      # so run it from repo root for this one step.
       - name: Terraform fmt (check)
         working-directory: .
         run: terraform fmt -check -recursive infra
@@ -52,14 +50,20 @@ jobs:
       - name: Terraform validate
         run: terraform validate
 
-      # Run tfsec from repo root with an absolute tfvars path
-      # so it never breaks due to working-directory/path resolution.
+      # Install tfsec so "tfsec: command not found" never happens
+      - name: Install tfsec
+        uses: aquasecurity/setup-trivy@v0.2.1
+        with:
+          tfsec-version: v1.28.14
+
       - name: tfsec (IaC security scan)
         working-directory: .
         run: |
-          tfsec --format=default --soft-fail \
+          tfsec --version
+          tfsec --format text --soft-fail \
             --tfvars-file "${{ github.workspace }}/infra/envs/dev/terraform.tfvars" \
             infra/envs/dev
+
 
       - name: checkov (IaC policy scan)
         uses: bridgecrewio/checkov-action@v12
