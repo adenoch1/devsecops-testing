@@ -41,8 +41,10 @@ jobs:
         with:
           terraform_version: 1.6.6
 
+      # Run fmt from repo root so it formats EVERYTHING under infra/
       - name: Terraform fmt (check)
-        run: terraform fmt -check -recursive ../../
+        working-directory: .
+        run: terraform fmt -check -recursive infra
 
       - name: Terraform init
         run: terraform init -input=false -reconfigure
@@ -50,13 +52,28 @@ jobs:
       - name: Terraform validate
         run: terraform validate
 
+      # Make tfvars optional: only pass it if it exists (prevents "no such file" failures)
+      - name: Detect tfvars
+        id: tfvars
+        working-directory: .
+        shell: bash
+        run: |
+          TFVARS_PATH="${GITHUB_WORKSPACE}/infra/envs/dev/terraform.tfvars"
+          if [[ -f "${TFVARS_PATH}" ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "path=${TFVARS_PATH}" >> "$GITHUB_OUTPUT"
+            echo "Found tfvars at ${TFVARS_PATH}"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "No tfvars at ${TFVARS_PATH} (tfsec will run without tfvars)"
+          fi
+
       - name: tfsec (IaC security scan)
         uses: aquasecurity/tfsec-action@v1.0.3
         with:
           working_directory: infra/envs/dev
           soft_fail: true
-          additional_args: |
-            --tfvars-file "${{ github.workspace }}/infra/envs/dev/terraform.tfvars"
+          additional_args: ${{ steps.tfvars.outputs.exists == 'true' && format('--tfvars-file "{0}"', steps.tfvars.outputs.path) || '' }}
 
       - name: checkov (IaC policy scan)
         uses: bridgecrewio/checkov-action@v12
