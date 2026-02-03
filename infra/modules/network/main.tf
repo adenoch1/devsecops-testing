@@ -178,3 +178,14 @@ resource "aws_flow_log" "this" {
     Name = "${var.name_prefix}-vpc-flowlogs"
   })
 }
+
+resource "aws_default_security_group" "this" {
+  vpc_id = aws_vpc.this.id
+
+  ingress = []
+  egress  = []
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-default-sg"
+  })
+}

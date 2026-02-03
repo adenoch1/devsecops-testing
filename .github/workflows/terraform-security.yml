@@ -56,7 +56,10 @@ jobs:
         uses: aquasecurity/tfsec-action@v1.0.3
         with:
           soft_fail: false
-          working_directory: infra/envs/dev
+          # Run from repo root so the tfvars path resolves correctly in GitHub Actions
+          working_directory: .
+          # Explicit tfvars path + explicit scan directory
+          additional_args: --tfvars-file infra/envs/dev/terraform.tfvars infra/envs/dev
 
       - name: checkov (IaC policy scan)
         uses: bridgecrewio/checkov-action@v12
