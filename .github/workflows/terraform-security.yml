@@ -54,7 +54,6 @@ jobs:
       - name: tfsec (IaC security scan)
         uses: aquasecurity/tfsec-action@v1.0.3
         with:
-          working_directory: infra/envs/dev
           soft_fail: true
           additional_args: |
             --tfvars-file "${{ github.workspace }}/infra/envs/dev/terraform.tfvars"
