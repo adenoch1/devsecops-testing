@@ -121,22 +121,26 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
   }
 }
 
-# CKV_AWS_300 / CKV2_AWS_61 style: lifecycle & abort multipart uploads
 resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
 
   rule {
-    id     = "lifecycle"
+    id     = "log-lifecycle"
     status = "Enabled"
 
     filter { prefix = "" }
 
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
+    transition {
+      days          = var.lifecycle_glacier_days
+      storage_class = "GLACIER"
     }
 
-    noncurrent_version_expiration {
-      noncurrent_days = 30
+    expiration {
+      days = var.lifecycle_expire_days
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
     }
   }
 }
@@ -230,17 +234,22 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
   bucket = aws_s3_bucket.alb_logs_access.id
 
   rule {
-    id     = "lifecycle"
+    id     = "log-lifecycle"
     status = "Enabled"
 
     filter { prefix = "" }
 
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
+    transition {
+      days          = var.lifecycle_glacier_days
+      storage_class = "GLACIER"
     }
 
-    noncurrent_version_expiration {
-      noncurrent_days = 30
+    expiration {
+      days = var.lifecycle_expire_days
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
     }
   }
 }
