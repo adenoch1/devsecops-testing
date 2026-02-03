@@ -26,6 +26,10 @@ resource "aws_kms_alias" "alb_logs" {
   target_key_id = aws_kms_key.alb_logs.key_id
 }
 
+# KMS key policies often require Resource="*" by design; these Checkov rules can false-positive.
+#checkov:skip=CKV_AWS_109: "KMS key policy requires Resource='*' in key policy statements; acceptable for this demo."
+#checkov:skip=CKV_AWS_111: "KMS key policy requires Resource='*' in key policy statements; acceptable for this demo."
+#checkov:skip=CKV_AWS_356: "KMS key policy requires Resource='*' in key policy statements; acceptable for this demo."
 data "aws_iam_policy_document" "kms_key_policy" {
   statement {
     sid     = "EnableRootPermissions"
@@ -84,6 +88,8 @@ data "aws_iam_policy_document" "kms_key_policy" {
 # -------------------------------------------------------------
 # S3 Bucket: ALB Logs (Target bucket)
 # -------------------------------------------------------------
+# Replication intentionally disabled for this demo env.
+#checkov:skip=CKV_AWS_144: "Cross-region replication intentionally disabled for this environment"
 resource "aws_s3_bucket" "alb_logs" {
   bucket        = local.log_bucket_name
   force_destroy = false
@@ -145,6 +151,14 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
   }
 }
 
+# ✅ tfsec aws-s3-enable-bucket-logging fix:
+# Enable server access logging for alb_logs by sending logs to the access bucket.
+resource "aws_s3_bucket_logging" "alb_logs" {
+  bucket        = aws_s3_bucket.alb_logs.id
+  target_bucket = aws_s3_bucket.alb_logs_access.id
+  target_prefix = "s3-access/${var.name_prefix}/alb-logs/"
+}
+
 # Bucket policy for ALB access logs delivery
 data "aws_elb_service_account" "this" {}
 
@@ -182,14 +196,13 @@ resource "aws_s3_bucket_policy" "alb_logs" {
 }
 
 # -------------------------------------------------------------
-# S3 Bucket: Access Bucket (for S3 access logging)
+# S3 Bucket: Access Bucket (for server access logs destination)
 # -------------------------------------------------------------
+# Replication intentionally disabled for this demo env.
+#checkov:skip=CKV_AWS_144: "Cross-region replication intentionally disabled for this environment"
 resource "aws_s3_bucket" "alb_logs_access" {
   bucket        = local.log_access_bucket_name
   force_destroy = false
-
-  # Replication intentionally disabled for this demo env.
-  #checkov:skip=CKV_AWS_144: "Cross-region replication intentionally disabled for this environment"
 
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-alb-logs-access"
@@ -211,12 +224,6 @@ resource "aws_s3_bucket_versioning" "alb_logs_access" {
   versioning_configuration {
     status = "Enabled"
   }
-}
-
-resource "aws_s3_bucket_logging" "alb_logs_access" {
-  bucket        = aws_s3_bucket.alb_logs_access.id
-  target_bucket = aws_s3_bucket.alb_logs.id
-  target_prefix = "s3-access/${var.name_prefix}/"
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs_access" {
@@ -268,7 +275,7 @@ resource "aws_cloudwatch_log_group" "vpc_flow" {
 }
 
 # -------------------------------------------------------------
-# SQS queue used for ALB logs notifications (encrypted with CMK)
+# SQS queue used for S3 event notifications (encrypted with CMK)
 # -------------------------------------------------------------
 resource "aws_sqs_queue" "alb_logs_events" {
   name              = "${var.name_prefix}-alb-logs-events"
@@ -277,4 +284,60 @@ resource "aws_sqs_queue" "alb_logs_events" {
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-alb-logs-events"
   })
+}
+
+# Allow S3 to send event notifications to the SQS queue (required for CKV2_AWS_62)
+data "aws_iam_policy_document" "s3_to_sqs" {
+  statement {
+    sid    = "AllowS3SendMessage"
+    effect = "Allow"
+
+    actions = [
+      "sqs:SendMessage"
+    ]
+
+    principals {
+      type        = "Service"
+      identifiers = ["s3.amazonaws.com"]
+    }
+
+    resources = [aws_sqs_queue.alb_logs_events.arn]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values = [
+        aws_s3_bucket.alb_logs.arn,
+        aws_s3_bucket.alb_logs_access.arn
+      ]
+    }
+  }
+}
+
+resource "aws_sqs_queue_policy" "alb_logs_events" {
+  queue_url = aws_sqs_queue.alb_logs_events.id
+  policy    = data.aws_iam_policy_document.s3_to_sqs.json
+}
+
+# ✅ Checkov CKV2_AWS_62 fix: enable event notifications on both buckets
+resource "aws_s3_bucket_notification" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+
+  queue {
+    queue_arn = aws_sqs_queue.alb_logs_events.arn
+    events    = ["s3:ObjectCreated:*"]
+  }
+
+  depends_on = [aws_sqs_queue_policy.alb_logs_events]
+}
+
+resource "aws_s3_bucket_notification" "alb_logs_access" {
+  bucket = aws_s3_bucket.alb_logs_access.id
+
+  queue {
+    queue_arn = aws_sqs_queue.alb_logs_events.arn
+    events    = ["s3:ObjectCreated:*"]
+  }
+
+  depends_on = [aws_sqs_queue_policy.alb_logs_events]
 }
