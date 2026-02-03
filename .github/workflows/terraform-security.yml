@@ -51,12 +51,45 @@ jobs:
       - name: Terraform validate
         run: terraform validate
 
+      # -----------------------------
+      # tfsec (robust): install + run
+      # -----------------------------
+      - name: Install tfsec
+        run: |
+          curl -sSL https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+          tfsec --version
+
+      - name: Ensure tfvars exists for tfsec
+        run: |
+          # If terraform.tfvars is not committed in this repo (common), create a scan-only tfvars file
+          if [ -f terraform.tfvars ]; then
+            echo "Found terraform.tfvars in $(pwd)"
+            ls -la terraform.tfvars
+          else
+            echo "terraform.tfvars not found in $(pwd). Creating .tfsec.auto.tfvars for scanning..."
+            cat > .tfsec.auto.tfvars <<'EOF'
+aws_region = "ca-central-1"
+project    = "devsecops-testing"
+environment = "dev"
+owner      = "enoch"
+
+# Required values (set reasonable demo defaults for scanning)
+vpc_cidr = "192.168.0.0/16"
+
+# If your code requires ACM ARN for listener resources, keep a placeholder.
+# tfsec only needs values to evaluate expressions (it will not create resources).
+acm_certificate_arn = "arn:aws:acm:ca-central-1:000000000000:certificate/00000000-0000-0000-0000-000000000000"
+EOF
+            ls -la .tfsec.auto.tfvars
+          fi
+
       - name: tfsec (IaC security scan)
-        uses: aquasecurity/tfsec-action@v1.0.3
-        with:
-          soft_fail: true
-          additional_args: |
-            --tfvars-file "${{ github.workspace }}/infra/envs/dev/terraform.tfvars"
+        run: |
+          if [ -f terraform.tfvars ]; then
+            tfsec . --tfvars-file terraform.tfvars --soft-fail
+          else
+            tfsec . --tfvars-file .tfsec.auto.tfvars --soft-fail
+          fi
 
       - name: checkov (IaC policy scan)
         uses: bridgecrewio/checkov-action@v12
@@ -65,10 +98,6 @@ jobs:
           framework: terraform
           quiet: true
           soft_fail: false
-          # Skip checks that are expected in this demo module:
-          # - CKV2_AWS_76: WAFv2 AMR requirement (not implemented in this demo)
-          # - CKV_AWS_109/111/356: KMS key policies often require Resource="*"
-          # - CKV_AWS_144: S3 cross-region replication intentionally disabled
           skip_check: CKV2_AWS_76,CKV_AWS_109,CKV_AWS_111,CKV_AWS_356,CKV_AWS_144
 
       - name: Terraform plan
