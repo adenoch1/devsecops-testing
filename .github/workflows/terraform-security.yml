@@ -52,28 +52,14 @@ jobs:
       - name: Terraform validate
         run: terraform validate
 
-      # Fix for tfsec tfvars issue:
-      # - DO NOT write to /github (permission denied on runner)
-      # - Create a temp tfvars file INSIDE the checked-out workspace
-      # - Pass an ABSOLUTE path based on $GITHUB_WORKSPACE (with leading "/")
-      - name: Prepare tfsec tfvars file (workspace-safe)
-        id: tfsec_tfvars
-        shell: bash
-        working-directory: .
-        run: |
-          TFVARS_FILE="${GITHUB_WORKSPACE}/.tfsec.auto.tfvars"
-          echo "# auto-generated for tfsec in CI" > "${TFVARS_FILE}"
-          echo "created_path=${TFVARS_FILE}" >> "$GITHUB_OUTPUT"
-          echo "Created: ${TFVARS_FILE}"
-          ls -la "${TFVARS_FILE}"
-
+      # IMPORTANT:
+      # Do NOT pass --tfvars-file to tfsec in GitHub Actions.
+      # tfsec-action runs in a container in many setups and path handling causes "no such file" errors.
       - name: tfsec (IaC security scan)
         uses: aquasecurity/tfsec-action@v1.0.3
         with:
           working_directory: infra/envs/dev
           soft_fail: true
-          additional_args: |
-            --tfvars-file "${{ steps.tfsec_tfvars.outputs.created_path }}"
 
       - name: checkov (IaC policy scan)
         uses: bridgecrewio/checkov-action@v12
