@@ -66,6 +66,15 @@ resource "aws_s3_bucket_versioning" "alb_logs_access" {
   }
 }
 
+# Enable access logging on the ACCESS bucket (logs-of-logs) to satisfy tfsec aws-s3-enable-bucket-logging
+# We point it to the main logs bucket to avoid logging to itself.
+resource "aws_s3_bucket_logging" "alb_logs_access" {
+  bucket        = aws_s3_bucket.alb_logs_access.id
+  target_bucket = aws_s3_bucket.alb_logs.id
+  target_prefix = "s3-access/${var.name_prefix}/"
+}
+
+
 resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs_access" {
   bucket = aws_s3_bucket.alb_logs_access.id
 
@@ -203,6 +212,28 @@ data "aws_iam_policy_document" "alb_logs_bucket_policy" {
       "arn:aws:s3:::${aws_s3_bucket.alb_logs.bucket}/${var.alb_log_prefix}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
     ]
   }
+  statement {
+    sid    = "AllowS3ServerAccessLogsDelivery"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["logging.s3.amazonaws.com"]
+    }
+
+    actions = ["s3:PutObject"]
+
+    resources = [
+      "arn:aws:s3:::${aws_s3_bucket.alb_logs.bucket}/s3-access/${var.name_prefix}/*"
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+
 }
 
 resource "aws_s3_bucket_policy" "alb_logs" {
@@ -211,12 +242,62 @@ resource "aws_s3_bucket_policy" "alb_logs" {
 }
 
 # ------------------------------------------------------------
+# KMS CMK for SQS (to satisfy CKV2_AWS_73 / tfsec CMK guidance)
+# ------------------------------------------------------------
+resource "aws_kms_key" "sqs_sse" {
+  description             = "CMK for SQS encryption (${var.name_prefix})"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "EnableRootPermissions"
+        Effect   = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        }
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid      = "AllowSQSUseOfTheKey"
+        Effect   = "Allow"
+        Principal = {
+          Service = "sqs.amazonaws.com"
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "aws:SourceAccount" = "${data.aws_caller_identity.current.account_id}"
+          }
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_kms_alias" "sqs_sse" {
+  name          = "alias/${var.name_prefix}-sqs-cmk"
+  target_key_id = aws_kms_key.sqs_sse.key_id
+}
+
+
+# ------------------------------------------------------------
 # CKV2_AWS_62: S3 event notifications enabled (SQS)
 # Also satisfies CKV_AWS_27: SQS encryption.
 # ------------------------------------------------------------
 resource "aws_sqs_queue" "alb_logs_events" {
   name              = "${var.name_prefix}-alb-logs-events"
-  kms_master_key_id = "alias/aws/sqs"
+  kms_master_key_id = aws_kms_key.sqs_sse.arn
 
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-alb-logs-events"

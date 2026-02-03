@@ -16,6 +16,7 @@ resource "aws_cloudwatch_log_group" "app" {
 # -----------------------------
 # Security Groups
 # -----------------------------
+#tfsec:ignore:aws-ec2-no-public-ingress-sgr  # Public HTTPS (443) is required for the demo ALB
 resource "aws_security_group" "alb" {
   name        = "${var.name_prefix}-alb-sg"
   description = "ALB security group"
@@ -65,6 +66,7 @@ resource "aws_security_group_rule" "alb_to_ecs_app_port" {
 }
 
 # ECS tasks egress: HTTPS only (for pulling images, talking to AWS APIs, etc.)
+#tfsec:ignore:aws-ec2-no-public-egress-sgr  # Egress HTTPS required for AWS APIs / ECR pulls (can be tightened with VPC endpoints)
 resource "aws_security_group_rule" "ecs_egress_https" {
   type              = "egress"
   description       = "ECS tasks outbound HTTPS only"
@@ -78,6 +80,7 @@ resource "aws_security_group_rule" "ecs_egress_https" {
 # -----------------------------
 # Application Load Balancer (HTTPS enforced)
 # -----------------------------
+#tfsec:ignore:aws-elb-alb-not-public  # This environment uses a public ALB; WAF is attached below
 resource "aws_lb" "this" {
   name                       = "${var.name_prefix}-alb"
   load_balancer_type         = "application"
@@ -97,6 +100,82 @@ resource "aws_lb" "this" {
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-alb"
   })
+}
+
+
+# -----------------------------
+# WAFv2 Web ACL (managed rules)
+# - Satisfies Checkov CKV2_AWS_76 by attaching a WebACL to the ALB
+# - Includes AWS Managed Rules that cover common exploits (including Log4j patterns)
+# -----------------------------
+resource "aws_wafv2_web_acl" "alb" {
+  name  = "${var.name_prefix}-alb-web-acl"
+  scope = "REGIONAL"
+
+  default_action {
+    allow {}
+  }
+
+  # AWS managed rules (Common)
+  rule {
+    name     = "AWSManagedRulesCommonRuleSet"
+    priority = 10
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesCommonRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${var.name_prefix}-waf-common"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  # AWS managed rules (Known Bad Inputs) - includes protections for known exploit payloads
+  rule {
+    name     = "AWSManagedRulesKnownBadInputsRuleSet"
+    priority = 20
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesKnownBadInputsRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${var.name_prefix}-waf-knownbad"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name                = "${var.name_prefix}-waf"
+    sampled_requests_enabled   = true
+  }
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-alb-web-acl"
+  })
+}
+
+resource "aws_wafv2_web_acl_association" "alb" {
+  resource_arn = aws_lb.this.arn
+  web_acl_arn  = aws_wafv2_web_acl.alb.arn
 }
 
 resource "aws_lb_target_group" "app" {
