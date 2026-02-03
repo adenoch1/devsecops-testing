@@ -52,28 +52,25 @@ jobs:
       - name: Terraform validate
         run: terraform validate
 
-      # Make tfvars optional: only pass it if it exists (prevents "no such file" failures)
-      - name: Detect tfvars
-        id: tfvars
-        working-directory: .
+      # If terraform.tfvars is missing in the repo (often ignored on purpose),
+      # create a temporary empty one so tfsec doesn't fail trying to load it.
+      - name: Ensure terraform.tfvars exists for scanners
         shell: bash
         run: |
-          TFVARS_PATH="${GITHUB_WORKSPACE}/infra/envs/dev/terraform.tfvars"
-          if [[ -f "${TFVARS_PATH}" ]]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "path=${TFVARS_PATH}" >> "$GITHUB_OUTPUT"
-            echo "Found tfvars at ${TFVARS_PATH}"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "No tfvars at ${TFVARS_PATH} (tfsec will run without tfvars)"
+          if [[ ! -f terraform.tfvars ]]; then
+            echo "terraform.tfvars not found in infra/envs/dev; creating an empty one for scans."
+            touch terraform.tfvars
           fi
+          ls -la
 
       - name: tfsec (IaC security scan)
         uses: aquasecurity/tfsec-action@v1.0.3
         with:
           working_directory: infra/envs/dev
           soft_fail: true
-          additional_args: ${{ steps.tfvars.outputs.exists == 'true' && format('--tfvars-file "{0}"', steps.tfvars.outputs.path) || '' }}
+          # Use a path that always exists in this job (inside working_directory)
+          additional_args: |
+            --tfvars-file "terraform.tfvars"
 
       - name: checkov (IaC policy scan)
         uses: bridgecrewio/checkov-action@v12
