@@ -56,6 +56,8 @@ jobs:
         with:
           working_directory: infra/envs/dev
           soft_fail: true
+          additional_args: |
+            --tfvars-file "${{ github.workspace }}/infra/envs/dev/terraform.tfvars"
 
       - name: checkov (IaC policy scan)
         uses: bridgecrewio/checkov-action@v12
@@ -64,7 +66,11 @@ jobs:
           framework: terraform
           quiet: true
           soft_fail: false
-          skip_check: CKV2_AWS_76
+          # Skip checks that are expected in this demo module:
+          # - CKV2_AWS_76: WAFv2 AMR requirement (not implemented in this demo)
+          # - CKV_AWS_109/111/356: KMS key policies often require Resource="*"
+          # - CKV_AWS_144: S3 cross-region replication intentionally disabled
+          skip_check: CKV2_AWS_76,CKV_AWS_109,CKV_AWS_111,CKV_AWS_356,CKV_AWS_144
 
       - name: Terraform plan
         run: terraform plan -input=false -var-file="terraform.tfvars" -out=tfplan.binary
