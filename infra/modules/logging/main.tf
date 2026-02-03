@@ -35,10 +35,25 @@ resource "aws_kms_alias" "alb_logs" {
   target_key_id = aws_kms_key.alb_logs.key_id
 }
 
-# ------------------------------------------------------------
-# Access-logging target bucket ("log of logs")
-# Satisfies CKV_AWS_18 for the MAIN ALB logs bucket.
-# ------------------------------------------------------------
+resource "aws_s3_bucket" "alb_logs" {
+  bucket        = local.log_bucket_name
+  force_destroy = false
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-alb-logs"
+  })
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
+  bucket = aws_s3_bucket.alb_logs.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
 resource "aws_s3_bucket" "alb_logs_access" {
   bucket        = local.log_access_bucket_name
   force_destroy = false
@@ -50,6 +65,17 @@ resource "aws_s3_bucket" "alb_logs_access" {
     Name = "${var.name_prefix}-alb-logs-access"
   })
 }
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs_access" {
+  bucket = aws_s3_bucket.alb_logs_access.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
 
 resource "aws_s3_bucket_public_access_block" "alb_logs_access" {
   bucket                  = aws_s3_bucket.alb_logs_access.id
@@ -115,20 +141,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
   }
 }
 
-# ------------------------------------------------------------
-# Main ALB Logs bucket (the bucket ALB writes to)
-# ------------------------------------------------------------
-resource "aws_s3_bucket" "alb_logs" {
-  bucket        = local.log_bucket_name
-  force_destroy = false
-
-  # Replication is intentionally NOT implemented for this demo env.
-  #checkov:skip=CKV_AWS_144: "Cross-region replication intentionally disabled for this environment"
-
-  tags = merge(var.tags, {
-    Name = "${var.name_prefix}-alb-logs"
-  })
-}
 
 resource "aws_s3_bucket_public_access_block" "alb_logs" {
   bucket                  = aws_s3_bucket.alb_logs.id
