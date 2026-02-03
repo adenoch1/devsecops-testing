@@ -26,7 +26,6 @@ resource "aws_kms_alias" "alb_logs" {
   target_key_id = aws_kms_key.alb_logs.key_id
 }
 
-# KMS key policies often require Resource="*" by design; these Checkov rules can false-positive.
 #checkov:skip=CKV_AWS_109: "KMS key policy requires Resource='*' in key policy statements; acceptable for this demo."
 #checkov:skip=CKV_AWS_111: "KMS key policy requires Resource='*' in key policy statements; acceptable for this demo."
 #checkov:skip=CKV_AWS_356: "KMS key policy requires Resource='*' in key policy statements; acceptable for this demo."
@@ -44,7 +43,6 @@ data "aws_iam_policy_document" "kms_key_policy" {
     resources = ["*"]
   }
 
-  # Allow CloudWatch Logs service to use the key
   statement {
     sid    = "AllowCloudWatchLogsUseOfTheKey"
     effect = "Allow"
@@ -64,7 +62,6 @@ data "aws_iam_policy_document" "kms_key_policy" {
     resources = ["*"]
   }
 
-  # Allow S3 to use the key for bucket encryption
   statement {
     sid    = "AllowS3UseOfTheKey"
     effect = "Allow"
@@ -88,7 +85,6 @@ data "aws_iam_policy_document" "kms_key_policy" {
 # -------------------------------------------------------------
 # S3 Bucket: ALB Logs (Target bucket)
 # -------------------------------------------------------------
-# Replication intentionally disabled for this demo env.
 #checkov:skip=CKV_AWS_144: "Cross-region replication intentionally disabled for this environment"
 resource "aws_s3_bucket" "alb_logs" {
   bucket        = local.log_bucket_name
@@ -151,14 +147,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
   }
 }
 
-# ✅ tfsec aws-s3-enable-bucket-logging fix:
-# Enable server access logging for alb_logs by sending logs to the access bucket.
-resource "aws_s3_bucket_logging" "alb_logs" {
-  bucket        = aws_s3_bucket.alb_logs.id
-  target_bucket = aws_s3_bucket.alb_logs_access.id
-  target_prefix = "s3-access/${var.name_prefix}/alb-logs/"
-}
-
 # Bucket policy for ALB access logs delivery
 data "aws_elb_service_account" "this" {}
 
@@ -196,9 +184,8 @@ resource "aws_s3_bucket_policy" "alb_logs" {
 }
 
 # -------------------------------------------------------------
-# S3 Bucket: Access Bucket (for server access logs destination)
+# S3 Bucket: Access Bucket (destination for server access logs)
 # -------------------------------------------------------------
-# Replication intentionally disabled for this demo env.
 #checkov:skip=CKV_AWS_144: "Cross-region replication intentionally disabled for this environment"
 resource "aws_s3_bucket" "alb_logs_access" {
   bucket        = local.log_access_bucket_name
@@ -261,6 +248,21 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
   }
 }
 
+# ✅ tfsec aws-s3-enable-bucket-logging fixes:
+# 1) Log ALB logs bucket access to the access bucket
+resource "aws_s3_bucket_logging" "alb_logs" {
+  bucket        = aws_s3_bucket.alb_logs.id
+  target_bucket = aws_s3_bucket.alb_logs_access.id
+  target_prefix = "s3-access/${var.name_prefix}/alb-logs/"
+}
+
+# 2) ALSO enable access logging for the access bucket itself (send to alb_logs)
+resource "aws_s3_bucket_logging" "alb_logs_access" {
+  bucket        = aws_s3_bucket.alb_logs_access.id
+  target_bucket = aws_s3_bucket.alb_logs.id
+  target_prefix = "s3-access/${var.name_prefix}/alb-logs-access/"
+}
+
 # -------------------------------------------------------------
 # CloudWatch Log Group for VPC Flow Logs (encrypted with CMK)
 # -------------------------------------------------------------
@@ -286,15 +288,12 @@ resource "aws_sqs_queue" "alb_logs_events" {
   })
 }
 
-# Allow S3 to send event notifications to the SQS queue (required for CKV2_AWS_62)
 data "aws_iam_policy_document" "s3_to_sqs" {
   statement {
     sid    = "AllowS3SendMessage"
     effect = "Allow"
 
-    actions = [
-      "sqs:SendMessage"
-    ]
+    actions = ["sqs:SendMessage"]
 
     principals {
       type        = "Service"
