@@ -1,6 +1,6 @@
 data "aws_region" "current" {}
 
-# -----------------------------
+# ------------------------------
 # CloudWatch Logs (encrypted with KMS)
 # -----------------------------
 resource "aws_cloudwatch_log_group" "app" {
