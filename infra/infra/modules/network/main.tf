@@ -157,6 +157,7 @@ data "aws_iam_policy_document" "flow_logs_permissions" {
       "logs:DescribeLogGroups",
       "logs:DescribeLogStreams"
     ]
+    #tfsec:ignore:aws-iam-no-policy-wildcards  # log stream ARNs are dynamic; wildcard required for VPC Flow Logs
     resources = ["${aws_cloudwatch_log_group.vpc_flow.arn}:*"]
   }
 }
