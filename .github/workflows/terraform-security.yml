@@ -80,4 +80,4 @@ jobs:
           conftest --version
 
       - name: Conftest Policy Gate (OPA)
-        run: conftest test tfplan.json -p ../../policy/conftest --all-namespaces
+        run: conftest test tfplan.json -p ../../../policy/conftest --all-namespaces
