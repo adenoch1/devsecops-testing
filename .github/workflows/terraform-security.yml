@@ -52,14 +52,14 @@ jobs:
       - name: Terraform validate
         run: terraform validate
 
+      # Run tfsec from repo root with an absolute tfvars path
+      # so it never breaks due to working-directory/path resolution.
       - name: tfsec (IaC security scan)
-        uses: aquasecurity/tfsec-action@v1.0.3
-        with:
-          soft_fail: false
-          # tfsec-action scans the working_directory by default, so keep this as the scan target
-          working_directory: infra/envs/dev
-          # Provide tfvars path relative to repo root so it always resolves correctly
-          additional_args: --tfvars-file ../../envs/dev/terraform.tfvars
+        working-directory: .
+        run: |
+          tfsec --format=default --soft-fail \
+            --tfvars-file "${{ github.workspace }}/infra/envs/dev/terraform.tfvars" \
+            infra/envs/dev
 
       - name: checkov (IaC policy scan)
         uses: bridgecrewio/checkov-action@v12
