@@ -83,11 +83,11 @@ resource "aws_security_group_rule" "ecs_egress_https" {
 # -----------------------------
 #checkov:skip=CKV2_AWS_76: "WAFv2 WebACL with AWS Managed Rules is attached in this module; CKV2_AWS_76 can still false-positive depending on graph evaluation."
 resource "aws_lb" "this" {
-  name                       = "${var.name_prefix}-alb"
-  load_balancer_type         = "application"
+  name               = "${var.name_prefix}-alb"
+  load_balancer_type = "application"
 
   #tfsec:ignore:aws-elb-alb-not-public
-  internal                   = false
+  internal = false
 
   security_groups            = [aws_security_group.alb.id]
   subnets                    = var.public_subnet_ids
