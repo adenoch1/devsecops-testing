@@ -6,9 +6,9 @@ locals {
   log_access_bucket_name = "${var.name_prefix}-${data.aws_caller_identity.current.account_id}-alb-logs-access"
 }
 
-# ------------------------------------------------------------
+# -------------------------------------------------------------
 # KMS CMK for ALB Logs bucket encryption (source region)
-# ------------------------------------------------------------
+# -------------------------------------------------------------
 resource "aws_kms_key" "alb_logs" {
   description             = "CMK for ALB logs buckets (${var.name_prefix})"
   deletion_window_in_days = 7
