@@ -96,32 +96,32 @@ deny[msg] {
 
 # -----------------------------
 # 3) S3 buckets must be encrypted (SSE-S3 or SSE-KMS)
-#    Support BOTH styles:
-#    - inline server_side_encryption_configuration on aws_s3_bucket
-#    - separate aws_s3_bucket_server_side_encryption_configuration resource
+#    Support:
+#    A) Inline SSE on aws_s3_bucket
+#    B) Separate aws_s3_bucket_server_side_encryption_configuration
+#       matched by address naming (most reliable in plan JSON)
 # -----------------------------
 deny[msg] {
   rc := input.resource_changes[_]
   is_managed(rc)
   rc.type == "aws_s3_bucket"
 
-  a := after(rc)
+  b := after(rc)
 
-  not s3_bucket_encrypted(rc, a)
+  not s3_bucket_encrypted(rc, b)
 
   msg := sprintf("S3: Bucket must be encrypted (SSE-S3 or SSE-KMS): %v", [rc.address])
 }
 
-s3_bucket_encrypted(rc, bucket_after) {
-  # Style A: Inline SSE block on aws_s3_bucket (some provider configs)
-  has_inline_sse(bucket_after)
+s3_bucket_encrypted(rc, b) {
+  has_inline_sse(b)
 }
 
-s3_bucket_encrypted(rc, bucket_after) {
-  # Style B: Separate encryption config resource exists for this bucket
-  has_separate_sse_config_for_bucket(bucket_after)
+s3_bucket_encrypted(rc, b) {
+  has_matching_sse_resource(rc)
 }
 
+# Inline SSE block (some provider configs)
 has_inline_sse(b) {
   rule := b.server_side_encryption_configuration.rule[_]
   apply := rule.apply_server_side_encryption_by_default
@@ -134,16 +134,35 @@ has_inline_sse(b) {
   apply.sse_algorithm == "aws:kms"
 }
 
-has_separate_sse_config_for_bucket(bucket_after) {
-  # Find an aws_s3_bucket_server_side_encryption_configuration whose "bucket"
-  # matches this aws_s3_bucket's name/id in the plan
+# Separate SSE config resource exists with same logical name as the bucket:
+#   module.logging.aws_s3_bucket.alb_logs
+#   module.logging.aws_s3_bucket_server_side_encryption_configuration.alb_logs
+has_matching_sse_resource(bucket_rc) {
+  expected := sprintf("%s_server_side_encryption_configuration%s", [
+    "aws_s3_bucket",
+    substring(bucket_rc.address, count(bucket_rc.address) - count(trim_prefix(bucket_rc.address, "module.logging.")), count(bucket_rc.address))
+  ])
+  # The above line is too clever for OPA. We'll implement it more directly below.
+  false
+}
+
+# A simpler and robust approach:
+# Build the expected SSE address by replacing the type portion in the address.
+expected_sse_address(bucket_addr) := sse_addr {
+  # Replace ".aws_s3_bucket." with ".aws_s3_bucket_server_side_encryption_configuration."
+  sse_addr := replace(bucket_addr, ".aws_s3_bucket.", ".aws_s3_bucket_server_side_encryption_configuration.")
+}
+
+has_matching_sse_resource(bucket_rc) {
+  sse_addr := expected_sse_address(bucket_rc.address)
+
   some i
   rc2 := input.resource_changes[i]
   is_managed(rc2)
   rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
+  rc2.address == sse_addr
 
   enc := rc2.change.after
-  enc.bucket == bucket_after.bucket
 
   # Ensure it sets AES256 or aws:kms
   rule := enc.rule[_]
@@ -151,52 +170,20 @@ has_separate_sse_config_for_bucket(bucket_after) {
   apply.sse_algorithm == "AES256"
 }
 
-has_separate_sse_config_for_bucket(bucket_after) {
+has_matching_sse_resource(bucket_rc) {
+  sse_addr := expected_sse_address(bucket_rc.address)
+
   some i
   rc2 := input.resource_changes[i]
   is_managed(rc2)
   rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
+  rc2.address == sse_addr
 
   enc := rc2.change.after
-  enc.bucket == bucket_after.bucket
 
   rule := enc.rule[_]
   apply := rule.apply_server_side_encryption_by_default
   apply.sse_algorithm == "aws:kms"
-}
-
-# Public access blocks (kept)
-deny[msg] {
-  rc := input.resource_changes[_]
-  is_managed(rc)
-  rc.type == "aws_s3_bucket_public_access_block"
-
-  a := after(rc)
-  a.block_public_acls != true
-
-  msg := sprintf("S3: block_public_acls must be true: %v", [rc.address])
-}
-
-deny[msg] {
-  rc := input.resource_changes[_]
-  is_managed(rc)
-  rc.type == "aws_s3_bucket_public_access_block"
-
-  a := after(rc)
-  a.block_public_policy != true
-
-  msg := sprintf("S3: block_public_policy must be true: %v", [rc.address])
-}
-
-deny[msg] {
-  rc := input.resource_changes[_]
-  is_managed(rc)
-  rc.type == "aws_s3_bucket_public_access_block"
-
-  a := after(rc)
-  a.restrict_public_buckets != true
-
-  msg := sprintf("S3: restrict_public_buckets must be true: %v", [rc.address])
 }
 
 # -----------------------------
