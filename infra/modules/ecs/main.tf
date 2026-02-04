@@ -298,9 +298,9 @@ resource "aws_ecs_task_definition" "this" {
   })
 }
 
-# ---------------------------
+# --------------------------
 # ECS Service
-# ---------------------------
+# --------------------------
 resource "aws_ecs_service" "this" {
   name            = "${var.name_prefix}-svc"
   cluster         = aws_ecs_cluster.this.id
