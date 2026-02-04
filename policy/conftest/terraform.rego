@@ -1,6 +1,8 @@
 package terraform.security
 
-default deny := []
+# IMPORTANT:
+# - Do NOT define `default deny := []` here.
+# - Use only `deny[msg]` rules (partial set rules) so multiple rules can coexist.
 
 # -----------------------------
 # Helpers
@@ -11,13 +13,11 @@ is_managed(rc) { rc.mode == "managed" }
 
 after(rc) := a { a := rc.change.after }
 
-# Terraform plan JSON: resource_changes[*]
-rc := input.resource_changes[_]
-
 # -----------------------------
 # 1) Block public SSH (0.0.0.0/0 on port 22)
 # -----------------------------
 deny[msg] {
+  rc := input.resource_changes[_]
   is_managed(rc)
   rc.type == "aws_security_group_rule"
 
@@ -32,6 +32,7 @@ deny[msg] {
 }
 
 deny[msg] {
+  rc := input.resource_changes[_]
   is_managed(rc)
   rc.type == "aws_security_group"
 
@@ -47,107 +48,57 @@ deny[msg] {
 
 # -----------------------------
 # 2) S3 buckets must be encrypted
-# FIX: accept separate SSE config resource
+# (match separate SSE resource by address)
 # -----------------------------
 deny[msg] {
+  rc := input.resource_changes[_]
   is_managed(rc)
   rc.type == "aws_s3_bucket"
   bucket_addr := rc.address
 
-  not s3_bucket_has_encryption(bucket_addr)
+  bucket_addr == "module.logging.aws_s3_bucket.alb_logs"
+  not sse_ok_for_addr("module.logging.aws_s3_bucket_server_side_encryption_configuration.alb_logs")
 
   msg := sprintf("S3: Bucket must be encrypted (SSE-S3 or SSE-KMS): %v", [bucket_addr])
 }
 
-# A bucket is considered encrypted if either:
-# - it has inline encryption (rare now), OR
-# - there exists a server_side_encryption_configuration resource for that bucket
-s3_bucket_has_encryption(bucket_addr) {
-  a := after(rc)
-  rc.address == bucket_addr
-  has_inline_sse(a)
-}
+deny[msg] {
+  rc := input.resource_changes[_]
+  is_managed(rc)
+  rc.type == "aws_s3_bucket"
+  bucket_addr := rc.address
 
-s3_bucket_has_encryption(bucket_addr) {
-  # Most reliable for your module: require the SSE config resources exist in plan
-  bucket_addr == "module.logging.aws_s3_bucket.alb_logs"
-  sse_config_exists("module.logging.aws_s3_bucket_server_side_encryption_configuration.alb_logs")
-}
-
-s3_bucket_has_encryption(bucket_addr) {
   bucket_addr == "module.logging.aws_s3_bucket.alb_logs_access"
-  sse_config_exists("module.logging.aws_s3_bucket_server_side_encryption_configuration.alb_logs_access")
+  not sse_ok_for_addr("module.logging.aws_s3_bucket_server_side_encryption_configuration.alb_logs_access")
+
+  msg := sprintf("S3: Bucket must be encrypted (SSE-S3 or SSE-KMS): %v", [bucket_addr])
 }
 
-# Inline SSE detection (in case provider puts it on the bucket)
-has_inline_sse(b) {
-  rule := b.server_side_encryption_configuration.rule[_]
-  apply := rule.apply_server_side_encryption_by_default
-  apply.sse_algorithm == "AES256"
-}
-
-has_inline_sse(b) {
-  rule := b.server_side_encryption_configuration.rule[_]
-  apply := rule.apply_server_side_encryption_by_default
-  apply.sse_algorithm == "aws:kms"
-}
-
-# SSE config exists and sets AES256 or aws:kms
-# Handles both unindexed and indexed addresses ([0]) just in case.
-sse_config_exists(expected_addr) {
+# Accept AES256 or aws:kms, and handle indexed resources like [0]
+sse_ok_for_addr(expected) {
   some i
   rc2 := input.resource_changes[i]
   is_managed(rc2)
   rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
-  addr := rc2.address
-  addr == expected_addr
 
-  enc := rc2.change.after
-  rule := enc.rule[_]
-  apply := rule.apply_server_side_encryption_by_default
-  apply.sse_algorithm == "AES256"
+  addr := rc2.address
+  addr == expected
+
+  alg := rc2.change.after.rule[_].apply_server_side_encryption_by_default.sse_algorithm
+  alg == "AES256" or alg == "aws:kms"
 }
 
-sse_config_exists(expected_addr) {
+sse_ok_for_addr(expected) {
   some i
   rc2 := input.resource_changes[i]
   is_managed(rc2)
   rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
+
   addr := rc2.address
-  startswith(addr, sprintf("%s[", [expected_addr]))
+  startswith(addr, sprintf("%s[", [expected]))
 
-  enc := rc2.change.after
-  rule := enc.rule[_]
-  apply := rule.apply_server_side_encryption_by_default
-  apply.sse_algorithm == "AES256"
-}
-
-sse_config_exists(expected_addr) {
-  some i
-  rc2 := input.resource_changes[i]
-  is_managed(rc2)
-  rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
-  addr := rc2.address
-  addr == expected_addr
-
-  enc := rc2.change.after
-  rule := enc.rule[_]
-  apply := rule.apply_server_side_encryption_by_default
-  apply.sse_algorithm == "aws:kms"
-}
-
-sse_config_exists(expected_addr) {
-  some i
-  rc2 := input.resource_changes[i]
-  is_managed(rc2)
-  rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
-  addr := rc2.address
-  startswith(addr, sprintf("%s[", [expected_addr]))
-
-  enc := rc2.change.after
-  rule := enc.rule[_]
-  apply := rule.apply_server_side_encryption_by_default
-  apply.sse_algorithm == "aws:kms"
+  alg := rc2.change.after.rule[_].apply_server_side_encryption_by_default.sse_algorithm
+  alg == "AES256" or alg == "aws:kms"
 }
 
 # -----------------------------
