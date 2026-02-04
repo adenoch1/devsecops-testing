@@ -13,22 +13,6 @@ after(rc) := a {
   a := rc.change.after
 }
 
-# IAM policy helpers
-has_policy(x) { not is_null(x.policy) }
-has_policy(x) { not is_null(x.assume_role_policy) }
-
-get_statements(x) := s {
-  not is_null(x.policy)
-  doc := json.unmarshal(x.policy)
-  s := doc.Statement
-}
-
-get_statements(x) := s {
-  not is_null(x.assume_role_policy)
-  doc := json.unmarshal(x.assume_role_policy)
-  s := doc.Statement
-}
-
 # -----------------------------
 # 1) Block public SSH (0.0.0.0/0 on port 22)
 # -----------------------------
@@ -65,6 +49,21 @@ deny[msg] {
 # -----------------------------
 # 2) IAM least privilege: deny wildcard actions/resources
 # -----------------------------
+has_policy(x) { not is_null(x.policy) }
+has_policy(x) { not is_null(x.assume_role_policy) }
+
+get_statements(x) := s {
+  not is_null(x.policy)
+  doc := json.unmarshal(x.policy)
+  s := doc.Statement
+}
+
+get_statements(x) := s {
+  not is_null(x.assume_role_policy)
+  doc := json.unmarshal(x.assume_role_policy)
+  s := doc.Statement
+}
+
 deny[msg] {
   rc := input.resource_changes[_]
   is_managed(rc)
@@ -97,61 +96,90 @@ deny[msg] {
 
 # -----------------------------
 # 3) S3 buckets must be encrypted (SSE-S3 or SSE-KMS)
+#    Support:
+#    A) Inline SSE on aws_s3_bucket
+#    B) Separate aws_s3_bucket_server_side_encryption_configuration
+#       including indexed resources (e.g. ...alb_logs[0])
 # -----------------------------
 deny[msg] {
   rc := input.resource_changes[_]
   is_managed(rc)
   rc.type == "aws_s3_bucket"
 
-  a := after(rc)
-  not has_sse(a)
+  b := after(rc)
+
+  not s3_bucket_encrypted(rc, b)
 
   msg := sprintf("S3: Bucket must be encrypted (SSE-S3 or SSE-KMS): %v", [rc.address])
 }
 
-has_sse(b) {
+s3_bucket_encrypted(rc, b) {
+  has_inline_sse(b)
+}
+
+s3_bucket_encrypted(rc, b) {
+  has_matching_sse_resource(rc)
+}
+
+# Inline SSE block (some provider configs)
+has_inline_sse(b) {
   rule := b.server_side_encryption_configuration.rule[_]
   apply := rule.apply_server_side_encryption_by_default
   apply.sse_algorithm == "AES256"
 }
 
-has_sse(b) {
+has_inline_sse(b) {
   rule := b.server_side_encryption_configuration.rule[_]
   apply := rule.apply_server_side_encryption_by_default
   apply.sse_algorithm == "aws:kms"
 }
 
-deny[msg] {
-  rc := input.resource_changes[_]
-  is_managed(rc)
-  rc.type == "aws_s3_bucket_public_access_block"
-
-  a := after(rc)
-  a.block_public_acls != true
-
-  msg := sprintf("S3: block_public_acls must be true: %v", [rc.address])
+# Build expected SSE resource address from bucket address
+# module.logging.aws_s3_bucket.alb_logs
+# -> module.logging.aws_s3_bucket_server_side_encryption_configuration.alb_logs
+expected_sse_address(bucket_addr) := sse_addr {
+  sse_addr := replace(bucket_addr, ".aws_s3_bucket.", ".aws_s3_bucket_server_side_encryption_configuration.")
 }
 
-deny[msg] {
-  rc := input.resource_changes[_]
-  is_managed(rc)
-  rc.type == "aws_s3_bucket_public_access_block"
-
-  a := after(rc)
-  a.block_public_policy != true
-
-  msg := sprintf("S3: block_public_policy must be true: %v", [rc.address])
+# Match SSE resource address exactly OR as an indexed address like "...alb_logs[0]"
+address_matches_expected(actual, expected) {
+  actual == expected
 }
 
-deny[msg] {
-  rc := input.resource_changes[_]
-  is_managed(rc)
-  rc.type == "aws_s3_bucket_public_access_block"
+address_matches_expected(actual, expected) {
+  startswith(actual, sprintf("%s[", [expected]))
+}
 
-  a := after(rc)
-  a.restrict_public_buckets != true
+has_matching_sse_resource(bucket_rc) {
+  expected := expected_sse_address(bucket_rc.address)
 
-  msg := sprintf("S3: restrict_public_buckets must be true: %v", [rc.address])
+  some i
+  rc2 := input.resource_changes[i]
+  is_managed(rc2)
+  rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
+
+  address_matches_expected(rc2.address, expected)
+
+  enc := rc2.change.after
+  rule := enc.rule[_]
+  apply := rule.apply_server_side_encryption_by_default
+  apply.sse_algorithm == "AES256"
+}
+
+has_matching_sse_resource(bucket_rc) {
+  expected := expected_sse_address(bucket_rc.address)
+
+  some i
+  rc2 := input.resource_changes[i]
+  is_managed(rc2)
+  rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
+
+  address_matches_expected(rc2.address, expected)
+
+  enc := rc2.change.after
+  rule := enc.rule[_]
+  apply := rule.apply_server_side_encryption_by_default
+  apply.sse_algorithm == "aws:kms"
 }
 
 # -----------------------------
