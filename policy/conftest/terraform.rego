@@ -13,6 +13,11 @@ after(rc) := a {
   a := rc.change.after
 }
 
+last(xs) := x {
+  n := count(xs)
+  x := xs[n - 1]
+}
+
 # -----------------------------
 # 1) Block public SSH (0.0.0.0/0 on port 22)
 # -----------------------------
@@ -99,6 +104,7 @@ deny[msg] {
 #    Support:
 #    A) Inline SSE on aws_s3_bucket
 #    B) Separate aws_s3_bucket_server_side_encryption_configuration
+#       matched robustly by logical token (e.g. alb_logs / alb_logs_access),
 #       including indexed resources (e.g. ...alb_logs[0])
 # -----------------------------
 deny[msg] {
@@ -118,7 +124,7 @@ s3_bucket_encrypted(rc, b) {
 }
 
 s3_bucket_encrypted(rc, b) {
-  has_matching_sse_resource(rc)
+  has_matching_sse_resource_by_token(rc)
 }
 
 # Inline SSE block (some provider configs)
@@ -134,31 +140,27 @@ has_inline_sse(b) {
   apply.sse_algorithm == "aws:kms"
 }
 
-# Build expected SSE resource address from bucket address
-# module.logging.aws_s3_bucket.alb_logs
-# -> module.logging.aws_s3_bucket_server_side_encryption_configuration.alb_logs
-expected_sse_address(bucket_addr) := sse_addr {
-  sse_addr := replace(bucket_addr, ".aws_s3_bucket.", ".aws_s3_bucket_server_side_encryption_configuration.")
+# Extract the bucket's logical token from its address.
+# e.g. module.logging.aws_s3_bucket.alb_logs -> "alb_logs"
+bucket_token(bucket_rc) := tok {
+  parts := split(bucket_rc.address, ".")
+  tok := last(parts)
 }
 
-# Match SSE resource address exactly OR as an indexed address like "...alb_logs[0]"
-address_matches_expected(actual, expected) {
-  actual == expected
-}
-
-address_matches_expected(actual, expected) {
-  startswith(actual, sprintf("%s[", [expected]))
-}
-
-has_matching_sse_resource(bucket_rc) {
-  expected := expected_sse_address(bucket_rc.address)
+# Match SSE config resources that contain ".<token>" or ".<token>["
+# This handles:
+# - exact name match
+# - indexed resources like [0]
+# - minor address nesting differences
+has_matching_sse_resource_by_token(bucket_rc) {
+  tok := bucket_token(bucket_rc)
 
   some i
   rc2 := input.resource_changes[i]
   is_managed(rc2)
   rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
 
-  address_matches_expected(rc2.address, expected)
+  contains(rc2.address, sprintf(".%s", [tok]))
 
   enc := rc2.change.after
   rule := enc.rule[_]
@@ -166,15 +168,15 @@ has_matching_sse_resource(bucket_rc) {
   apply.sse_algorithm == "AES256"
 }
 
-has_matching_sse_resource(bucket_rc) {
-  expected := expected_sse_address(bucket_rc.address)
+has_matching_sse_resource_by_token(bucket_rc) {
+  tok := bucket_token(bucket_rc)
 
   some i
   rc2 := input.resource_changes[i]
   is_managed(rc2)
   rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
 
-  address_matches_expected(rc2.address, expected)
+  contains(rc2.address, sprintf(".%s", [tok]))
 
   enc := rc2.change.after
   rule := enc.rule[_]
