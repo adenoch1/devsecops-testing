@@ -3,11 +3,26 @@ package terraform.security
 # -----------------------------
 # Helpers
 # -----------------------------
-is_null(x) { x == null }
-
 is_managed(rc) { rc.mode == "managed" }
 
 after(rc) := a { a := rc.change.after }
+
+last(xs) := x {
+  n := count(xs)
+  x := xs[n - 1]
+}
+
+bucket_token(bucket_addr) := tok {
+  parts := split(bucket_addr, ".")
+  tok := last(parts)
+}
+
+# Get bucket fields safely (may be null/unknown in some plans)
+bucket_id(b) := id { id := b.id }
+bucket_id(b) := "" { not b.id }
+
+bucket_name(b) := n { n := b.bucket }
+bucket_name(b) := "" { not b.bucket }
 
 # -----------------------------
 # 1) Block public SSH (0.0.0.0/0 on port 22)
@@ -44,90 +59,82 @@ deny[msg] {
 
 # -----------------------------
 # 2) S3 buckets must be encrypted (SSE-S3 or SSE-KMS)
-# (match separate SSE resource by address)
+# Works with separate aws_s3_bucket_server_side_encryption_configuration
+# even when addresses are indexed or bucket is referenced by ID.
 # -----------------------------
 deny[msg] {
   rc := input.resource_changes[_]
   is_managed(rc)
   rc.type == "aws_s3_bucket"
-  bucket_addr := rc.address
 
-  bucket_addr == "module.logging.aws_s3_bucket.alb_logs"
-  not sse_ok_for_addr("module.logging.aws_s3_bucket_server_side_encryption_configuration.alb_logs")
+  b := after(rc)
 
-  msg := sprintf("S3: Bucket must be encrypted (SSE-S3 or SSE-KMS): %v", [bucket_addr])
+  not s3_bucket_encrypted(rc.address, b)
+
+  msg := sprintf("S3: Bucket must be encrypted (SSE-S3 or SSE-KMS): %v", [rc.address])
 }
 
-deny[msg] {
-  rc := input.resource_changes[_]
-  is_managed(rc)
-  rc.type == "aws_s3_bucket"
-  bucket_addr := rc.address
-
-  bucket_addr == "module.logging.aws_s3_bucket.alb_logs_access"
-  not sse_ok_for_addr("module.logging.aws_s3_bucket_server_side_encryption_configuration.alb_logs_access")
-
-  msg := sprintf("S3: Bucket must be encrypted (SSE-S3 or SSE-KMS): %v", [bucket_addr])
-}
-
-# -------------------------------------------------
-# SSE ok: non-indexed address + AES256
-# -------------------------------------------------
-sse_ok_for_addr(expected) {
+s3_bucket_encrypted(bucket_addr, b) {
+  tok := bucket_token(bucket_addr)
   some i
   rc2 := input.resource_changes[i]
   is_managed(rc2)
   rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
 
-  rc2.address == expected
+  enc := rc2.change.after
 
-  alg := rc2.change.after.rule[_].apply_server_side_encryption_by_default.sse_algorithm
-  alg == "AES256"
+  # Match by address token (handles ...alb_logs and ...alb_logs[0])
+  address_has_token(rc2.address, tok)
+
+  sse_alg_ok(enc)
 }
 
-# -------------------------------------------------
-# SSE ok: non-indexed address + aws:kms
-# -------------------------------------------------
-sse_ok_for_addr(expected) {
+s3_bucket_encrypted(bucket_addr, b) {
   some i
   rc2 := input.resource_changes[i]
   is_managed(rc2)
   rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
 
-  rc2.address == expected
+  enc := rc2.change.after
 
-  alg := rc2.change.after.rule[_].apply_server_side_encryption_by_default.sse_algorithm
-  alg == "aws:kms"
+  # Match by bucket reference (name or id)
+  encryption_points_to_bucket(enc, b)
+
+  sse_alg_ok(enc)
 }
 
-# -------------------------------------------------
-# SSE ok: indexed address (e.g. ...[0]) + AES256
-# -------------------------------------------------
-sse_ok_for_addr(expected) {
-  some i
-  rc2 := input.resource_changes[i]
-  is_managed(rc2)
-  rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
-
-  startswith(rc2.address, sprintf("%s[", [expected]))
-
-  alg := rc2.change.after.rule[_].apply_server_side_encryption_by_default.sse_algorithm
-  alg == "AES256"
+address_has_token(addr, tok) {
+  contains(addr, sprintf(".%s", [tok]))
 }
 
-# -------------------------------------------------
-# SSE ok: indexed address (e.g. ...[0]) + aws:kms
-# -------------------------------------------------
-sse_ok_for_addr(expected) {
-  some i
-  rc2 := input.resource_changes[i]
-  is_managed(rc2)
-  rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
+# enc.bucket or enc.bucket_id may exist depending on provider/version
+encryption_points_to_bucket(enc, b) {
+  enc.bucket == bucket_id(b)
+}
 
-  startswith(rc2.address, sprintf("%s[", [expected]))
+encryption_points_to_bucket(enc, b) {
+  enc.bucket == bucket_name(b)
+}
 
-  alg := rc2.change.after.rule[_].apply_server_side_encryption_by_default.sse_algorithm
-  alg == "aws:kms"
+encryption_points_to_bucket(enc, b) {
+  enc.bucket_id == bucket_id(b)
+}
+
+encryption_points_to_bucket(enc, b) {
+  enc.bucket_id == bucket_name(b)
+}
+
+# SSE algorithm checks (no "or" to avoid parser issues)
+sse_alg_ok(enc) {
+  rule := enc.rule[_]
+  apply := rule.apply_server_side_encryption_by_default
+  apply.sse_algorithm == "AES256"
+}
+
+sse_alg_ok(enc) {
+  rule := enc.rule[_]
+  apply := rule.apply_server_side_encryption_by_default
+  apply.sse_algorithm == "aws:kms"
 }
 
 # -----------------------------
