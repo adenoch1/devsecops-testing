@@ -1,10 +1,10 @@
-aws_region          = "ca-central-1"
-project             = "devsecops-flask"
-environment         = "dev"
-owner               = "enoch"
+aws_region  = "ca-central-1"
+project     = "devsecops-flask"
+environment = "dev"
+owner       = "enoch"
 
 # REQUIRED (your variables.tf requires this; no default exists)
-vpc_cidr            = "192.168.0.0/16"
+vpc_cidr = "192.168.0.0/16"
 
 # REQUIRED for HTTPS listener
 acm_certificate_arn = "arn:aws:acm:ca-central-1:476532114555:certificate/8729f39e-2512-42ec-8592-bdfd726f8018"
