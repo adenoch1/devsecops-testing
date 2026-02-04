@@ -144,7 +144,9 @@ resource "aws_lb_listener" "https" {
 # WAFv2 (Log4j coverage + Logging)
 # -----------------------------
 resource "aws_cloudwatch_log_group" "waf" {
-  name              = "/aws/wafv2/${var.name_prefix}"
+  # NOTE: WAFv2 CloudWatch Logs destinations require the log group name
+  # to start with "aws-waf-logs-".
+  name              = "aws-waf-logs-${var.name_prefix}"
   retention_in_days = var.log_retention_days
   kms_key_id        = var.cloudwatch_logs_kms_key_arn
 
