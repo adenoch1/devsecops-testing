@@ -3,7 +3,7 @@ project     = "devsecops-flask"
 environment = "dev"
 owner       = "enoch"
 
-# REQUIRED (your variables.tf requires this; no default exists)
+# REQUIRED (your variables.tf requires this; no default exists) Note
 vpc_cidr = "192.168.0.0/16"
 
 # REQUIRED for HTTPS listener
