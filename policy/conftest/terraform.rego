@@ -9,6 +9,7 @@ after(rc) := a { a := rc.change.after }
 
 last(xs) := x {
   n := count(xs)
+  n > 0
   x := xs[n - 1]
 }
 
@@ -23,6 +24,21 @@ bucket_id(b) := "" { not b.id }
 
 bucket_name(b) := n { n := b.bucket }
 bucket_name(b) := "" { not b.bucket }
+
+# Normalize nested block shapes across Terraform JSON versions:
+# apply_server_side_encryption_by_default can be an object OR [object]
+sse_apply(rule) := apply {
+  v := rule.apply_server_side_encryption_by_default
+  is_array(v)
+  count(v) > 0
+  apply := v[0]
+}
+
+sse_apply(rule) := apply {
+  v := rule.apply_server_side_encryption_by_default
+  not is_array(v)
+  apply := v
+}
 
 # -----------------------------
 # 1) Block public SSH (0.0.0.0/0 on port 22)
@@ -59,8 +75,6 @@ deny[msg] {
 
 # -----------------------------
 # 2) S3 buckets must be encrypted (SSE-S3 or SSE-KMS)
-# Works with separate aws_s3_bucket_server_side_encryption_configuration
-# even when addresses are indexed or bucket is referenced by ID.
 # -----------------------------
 deny[msg] {
   rc := input.resource_changes[_]
@@ -76,6 +90,7 @@ deny[msg] {
 
 s3_bucket_encrypted(bucket_addr, b) {
   tok := bucket_token(bucket_addr)
+
   some i
   rc2 := input.resource_changes[i]
   is_managed(rc2)
@@ -124,16 +139,16 @@ encryption_points_to_bucket(enc, b) {
   enc.bucket_id == bucket_name(b)
 }
 
-# SSE algorithm checks (no "or" to avoid parser issues)
+# SSE algorithm checks (handles apply_server_side_encryption_by_default as object OR list)
 sse_alg_ok(enc) {
   rule := enc.rule[_]
-  apply := rule.apply_server_side_encryption_by_default
+  apply := sse_apply(rule)
   apply.sse_algorithm == "AES256"
 }
 
 sse_alg_ok(enc) {
   rule := enc.rule[_]
-  apply := rule.apply_server_side_encryption_by_default
+  apply := sse_apply(rule)
   apply.sse_algorithm == "aws:kms"
 }
 
