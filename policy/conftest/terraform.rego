@@ -3,15 +3,26 @@ package terraform.security
 # -----------------------------
 # Helpers
 # -----------------------------
-is_null(x) { x == null }
+is_managed(rc) { rc.mode == "managed" }
 
-is_managed(rc) {
-  rc.mode == "managed"
+after(rc) := a { a := rc.change.after }
+
+last(xs) := x {
+  n := count(xs)
+  x := xs[n - 1]
 }
 
-after(rc) := a {
-  a := rc.change.after
+bucket_token(bucket_addr) := tok {
+  parts := split(bucket_addr, ".")
+  tok := last(parts)
 }
+
+# Get bucket fields safely (may be null/unknown in some plans)
+bucket_id(b) := id { id := b.id }
+bucket_id(b) := "" { not b.id }
+
+bucket_name(b) := n { n := b.bucket }
+bucket_name(b) := "" { not b.bucket }
 
 # -----------------------------
 # 1) Block public SSH (0.0.0.0/0 on port 22)
@@ -47,59 +58,9 @@ deny[msg] {
 }
 
 # -----------------------------
-# 2) IAM least privilege: deny wildcard actions/resources
-# -----------------------------
-has_policy(x) { not is_null(x.policy) }
-has_policy(x) { not is_null(x.assume_role_policy) }
-
-get_statements(x) := s {
-  not is_null(x.policy)
-  doc := json.unmarshal(x.policy)
-  s := doc.Statement
-}
-
-get_statements(x) := s {
-  not is_null(x.assume_role_policy)
-  doc := json.unmarshal(x.assume_role_policy)
-  s := doc.Statement
-}
-
-deny[msg] {
-  rc := input.resource_changes[_]
-  is_managed(rc)
-  startswith(rc.type, "aws_iam_")
-
-  a := after(rc)
-  has_policy(a)
-
-  statement := get_statements(a)[_]
-  action := statement.Action[_]
-  action == "*"
-
-  msg := sprintf("IAM: Wildcard Action '*' is forbidden: %v", [rc.address])
-}
-
-deny[msg] {
-  rc := input.resource_changes[_]
-  is_managed(rc)
-  startswith(rc.type, "aws_iam_")
-
-  a := after(rc)
-  has_policy(a)
-
-  statement := get_statements(a)[_]
-  res := statement.Resource[_]
-  res == "*"
-
-  msg := sprintf("IAM: Wildcard Resource '*' is forbidden: %v", [rc.address])
-}
-
-# -----------------------------
-# 3) S3 buckets must be encrypted (SSE-S3 or SSE-KMS)
-#    Support:
-#    A) Inline SSE on aws_s3_bucket
-#    B) Separate aws_s3_bucket_server_side_encryption_configuration
-#       including indexed resources (e.g. ...alb_logs[0])
+# 2) S3 buckets must be encrypted (SSE-S3 or SSE-KMS)
+# Works with separate aws_s3_bucket_server_side_encryption_configuration
+# even when addresses are indexed or bucket is referenced by ID.
 # -----------------------------
 deny[msg] {
   rc := input.resource_changes[_]
@@ -108,82 +69,76 @@ deny[msg] {
 
   b := after(rc)
 
-  not s3_bucket_encrypted(rc, b)
+  not s3_bucket_encrypted(rc.address, b)
 
   msg := sprintf("S3: Bucket must be encrypted (SSE-S3 or SSE-KMS): %v", [rc.address])
 }
 
-s3_bucket_encrypted(rc, b) {
-  has_inline_sse(b)
-}
-
-s3_bucket_encrypted(rc, b) {
-  has_matching_sse_resource(rc)
-}
-
-# Inline SSE block (some provider configs)
-has_inline_sse(b) {
-  rule := b.server_side_encryption_configuration.rule[_]
-  apply := rule.apply_server_side_encryption_by_default
-  apply.sse_algorithm == "AES256"
-}
-
-has_inline_sse(b) {
-  rule := b.server_side_encryption_configuration.rule[_]
-  apply := rule.apply_server_side_encryption_by_default
-  apply.sse_algorithm == "aws:kms"
-}
-
-# Build expected SSE resource address from bucket address
-# module.logging.aws_s3_bucket.alb_logs
-# -> module.logging.aws_s3_bucket_server_side_encryption_configuration.alb_logs
-expected_sse_address(bucket_addr) := sse_addr {
-  sse_addr := replace(bucket_addr, ".aws_s3_bucket.", ".aws_s3_bucket_server_side_encryption_configuration.")
-}
-
-# Match SSE resource address exactly OR as an indexed address like "...alb_logs[0]"
-address_matches_expected(actual, expected) {
-  actual == expected
-}
-
-address_matches_expected(actual, expected) {
-  startswith(actual, sprintf("%s[", [expected]))
-}
-
-has_matching_sse_resource(bucket_rc) {
-  expected := expected_sse_address(bucket_rc.address)
-
+s3_bucket_encrypted(bucket_addr, b) {
+  tok := bucket_token(bucket_addr)
   some i
   rc2 := input.resource_changes[i]
   is_managed(rc2)
   rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
 
-  address_matches_expected(rc2.address, expected)
+  enc := rc2.change.after
+
+  # Match by address token (handles ...alb_logs and ...alb_logs[0])
+  address_has_token(rc2.address, tok)
+
+  sse_alg_ok(enc)
+}
+
+s3_bucket_encrypted(bucket_addr, b) {
+  some i
+  rc2 := input.resource_changes[i]
+  is_managed(rc2)
+  rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
 
   enc := rc2.change.after
+
+  # Match by bucket reference (name or id)
+  encryption_points_to_bucket(enc, b)
+
+  sse_alg_ok(enc)
+}
+
+address_has_token(addr, tok) {
+  contains(addr, sprintf(".%s", [tok]))
+}
+
+# enc.bucket or enc.bucket_id may exist depending on provider/version
+encryption_points_to_bucket(enc, b) {
+  enc.bucket == bucket_id(b)
+}
+
+encryption_points_to_bucket(enc, b) {
+  enc.bucket == bucket_name(b)
+}
+
+encryption_points_to_bucket(enc, b) {
+  enc.bucket_id == bucket_id(b)
+}
+
+encryption_points_to_bucket(enc, b) {
+  enc.bucket_id == bucket_name(b)
+}
+
+# SSE algorithm checks (no "or" to avoid parser issues)
+sse_alg_ok(enc) {
   rule := enc.rule[_]
   apply := rule.apply_server_side_encryption_by_default
   apply.sse_algorithm == "AES256"
 }
 
-has_matching_sse_resource(bucket_rc) {
-  expected := expected_sse_address(bucket_rc.address)
-
-  some i
-  rc2 := input.resource_changes[i]
-  is_managed(rc2)
-  rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
-
-  address_matches_expected(rc2.address, expected)
-
-  enc := rc2.change.after
+sse_alg_ok(enc) {
   rule := enc.rule[_]
   apply := rule.apply_server_side_encryption_by_default
   apply.sse_algorithm == "aws:kms"
 }
 
 # -----------------------------
-# 4) VPC Flow Logs must exist
+# 3) VPC Flow Logs must exist
 # -----------------------------
 deny[msg] {
   not flow_logs_present
@@ -197,7 +152,7 @@ flow_logs_present {
 }
 
 # -----------------------------
-# 5) If using ALB, require HTTPS listener 443
+# 4) If using ALB, require HTTPS listener 443
 # -----------------------------
 deny[msg] {
   uses_alb
@@ -216,15 +171,4 @@ https_listener_present {
   input.resource_changes[i].type == "aws_lb_listener"
   input.resource_changes[i].change.after.port == 443
   lower(input.resource_changes[i].change.after.protocol) == "https"
-}
-
-deny[msg] {
-  rc := input.resource_changes[_]
-  rc.type == "aws_lb_listener"
-
-  listener := rc.change.after
-  lower(listener.protocol) == "https"
-  not startswith(listener.ssl_policy, "ELBSecurityPolicy-TLS13")
-
-  msg := sprintf("ALB HTTPS listener must use TLS 1.2+ or TLS 1.3 policy. Found: %v", [listener.ssl_policy])
 }

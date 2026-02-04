@@ -7,84 +7,106 @@ locals {
 }
 
 # -------------------------------------------------------------
-# KMS CMK for ALB Logs bucket encryption + CloudWatch Logs encryption
+# KMS CMK for ALB Logs bucket encryption (source region)
 # -------------------------------------------------------------
 resource "aws_kms_key" "alb_logs" {
-  description             = "CMK for ALB logs and CloudWatch logs"
+  description             = "CMK for ALB logs buckets (${var.name_prefix})"
+  deletion_window_in_days = 7
   enable_key_rotation     = true
-  deletion_window_in_days = 30
 
-  policy = data.aws_iam_policy_document.kms_key_policy.json
-
-  tags = merge(var.tags, {
-    Name = "${var.name_prefix}-logs-kms"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "EnableRootPermissions"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      }
+    ]
   })
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-alb-logs-kms" })
 }
 
 resource "aws_kms_alias" "alb_logs" {
-  name          = "alias/${var.name_prefix}-logs"
+  name          = "alias/${var.name_prefix}-alb-logs"
   target_key_id = aws_kms_key.alb_logs.key_id
 }
 
-#checkov:skip=CKV_AWS_109: "KMS key policy requires Resource='*' in key policy statements; acceptable for this demo."
-#checkov:skip=CKV_AWS_111: "KMS key policy requires Resource='*' in key policy statements; acceptable for this demo."
-#checkov:skip=CKV_AWS_356: "KMS key policy requires Resource='*' in key policy statements; acceptable for this demo."
-data "aws_iam_policy_document" "kms_key_policy" {
-  statement {
-    sid     = "EnableRootPermissions"
-    effect  = "Allow"
-    actions = ["kms:*"]
+# ------------------------------------------------------------
+# Access-logging target bucket ("log of logs")
+# ------------------------------------------------------------
+#checkov:skip=CKV_AWS_144: "Cross-region replication intentionally disabled for this environment"
+resource "aws_s3_bucket" "alb_logs_access" {
+  bucket        = local.log_access_bucket_name
+  force_destroy = false
 
-    principals {
-      type        = "AWS"
-      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
-    }
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-alb-logs-access"
+  })
+}
 
-    resources = ["*"]
-  }
+resource "aws_s3_bucket_public_access_block" "alb_logs_access" {
+  bucket                  = aws_s3_bucket.alb_logs_access.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
 
-  statement {
-    sid    = "AllowCloudWatchLogsUseOfTheKey"
-    effect = "Allow"
-    actions = [
-      "kms:Encrypt",
-      "kms:Decrypt",
-      "kms:ReEncrypt*",
-      "kms:GenerateDataKey*",
-      "kms:DescribeKey"
-    ]
-
-    principals {
-      type        = "Service"
-      identifiers = ["logs.${data.aws_region.current.id}.amazonaws.com"]
-    }
-
-    resources = ["*"]
-  }
-
-  statement {
-    sid    = "AllowS3UseOfTheKey"
-    effect = "Allow"
-    actions = [
-      "kms:Encrypt",
-      "kms:Decrypt",
-      "kms:ReEncrypt*",
-      "kms:GenerateDataKey*",
-      "kms:DescribeKey"
-    ]
-
-    principals {
-      type        = "Service"
-      identifiers = ["s3.amazonaws.com"]
-    }
-
-    resources = ["*"]
+resource "aws_s3_bucket_versioning" "alb_logs_access" {
+  bucket = aws_s3_bucket.alb_logs_access.id
+  versioning_configuration {
+    status = "Enabled"
   }
 }
 
-# -------------------------------------------------------------
-# S3 Bucket: ALB Logs (Target bucket)
-# -------------------------------------------------------------
+# SSE (separate resource) ✅ avoids deprecated inline server_side_encryption_configuration
+resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs_access" {
+  bucket = aws_s3_bucket.alb_logs_access.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.alb_logs.arn
+    }
+  }
+}
+
+# Lifecycle (fixed) ✅ no unsupported arguments
+resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
+  bucket = aws_s3_bucket.alb_logs_access.id
+
+  rule {
+    id     = "lifecycle"
+    status = "Enabled"
+
+    filter { prefix = "" }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    transition {
+      days          = var.lifecycle_glacier_days
+      storage_class = "GLACIER"
+    }
+
+    expiration {
+      days = var.lifecycle_expire_days
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.lifecycle_expire_days
+    }
+  }
+}
+
+# ------------------------------------------------------------
+# Main ALB Logs bucket (the bucket ALB writes to)
+# ------------------------------------------------------------
 #checkov:skip=CKV_AWS_144: "Cross-region replication intentionally disabled for this environment"
 resource "aws_s3_bucket" "alb_logs" {
   bucket        = local.log_bucket_name
@@ -96,8 +118,7 @@ resource "aws_s3_bucket" "alb_logs" {
 }
 
 resource "aws_s3_bucket_public_access_block" "alb_logs" {
-  bucket = aws_s3_bucket.alb_logs.id
-
+  bucket                  = aws_s3_bucket.alb_logs.id
   block_public_acls       = true
   block_public_policy     = true
   ignore_public_acls      = true
@@ -106,7 +127,6 @@ resource "aws_s3_bucket_public_access_block" "alb_logs" {
 
 resource "aws_s3_bucket_versioning" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
-
   versioning_configuration {
     status = "Enabled"
   }
@@ -123,14 +143,31 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
   }
 }
 
+# Enable access logging on BOTH buckets (tfsec aws-s3-enable-bucket-logging)
+resource "aws_s3_bucket_logging" "alb_logs" {
+  bucket        = aws_s3_bucket.alb_logs.id
+  target_bucket = aws_s3_bucket.alb_logs_access.id
+  target_prefix = "s3-access/${local.log_bucket_name}/"
+}
+
+resource "aws_s3_bucket_logging" "alb_logs_access" {
+  bucket        = aws_s3_bucket.alb_logs_access.id
+  target_bucket = aws_s3_bucket.alb_logs.id
+  target_prefix = "s3-access/${var.name_prefix}/"
+}
+
 resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
 
   rule {
-    id     = "log-lifecycle"
+    id     = "lifecycle"
     status = "Enabled"
 
     filter { prefix = "" }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
 
     transition {
       days          = var.lifecycle_glacier_days
@@ -141,40 +178,52 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
       days = var.lifecycle_expire_days
     }
 
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
+    noncurrent_version_expiration {
+      noncurrent_days = var.lifecycle_expire_days
     }
   }
 }
 
-# Bucket policy for ALB access logs delivery
-data "aws_elb_service_account" "this" {}
-
+# ------------------------------------------------------------
+# Allow ALB log delivery
+# ------------------------------------------------------------
 data "aws_iam_policy_document" "alb_logs_bucket_policy" {
   statement {
-    sid     = "AWSALBAccessLogsWrite"
-    effect  = "Allow"
-    actions = ["s3:PutObject"]
+    sid    = "AllowALBLogDelivery"
+    effect = "Allow"
 
     principals {
-      type        = "AWS"
-      identifiers = [data.aws_elb_service_account.this.arn]
+      type        = "Service"
+      identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
     }
 
-    resources = ["${aws_s3_bucket.alb_logs.arn}/*"]
+    actions = ["s3:PutObject"]
+
+    resources = [
+      "arn:aws:s3:::${aws_s3_bucket.alb_logs.bucket}/${var.alb_log_prefix}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
+    ]
   }
 
   statement {
-    sid     = "AWSALBAccessLogsAclCheck"
-    effect  = "Allow"
-    actions = ["s3:GetBucketAcl"]
+    sid    = "AllowS3ServerAccessLogsDelivery"
+    effect = "Allow"
 
     principals {
-      type        = "AWS"
-      identifiers = [data.aws_elb_service_account.this.arn]
+      type        = "Service"
+      identifiers = ["logging.s3.amazonaws.com"]
     }
 
-    resources = [aws_s3_bucket.alb_logs.arn]
+    actions = ["s3:PutObject"]
+
+    resources = [
+      "arn:aws:s3:::${aws_s3_bucket.alb_logs.bucket}/s3-access/${var.name_prefix}/*"
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
   }
 }
 
@@ -183,148 +232,115 @@ resource "aws_s3_bucket_policy" "alb_logs" {
   policy = data.aws_iam_policy_document.alb_logs_bucket_policy.json
 }
 
-# -------------------------------------------------------------
-# S3 Bucket: Access Bucket (destination for server access logs)
-# -------------------------------------------------------------
-#checkov:skip=CKV_AWS_144: "Cross-region replication intentionally disabled for this environment"
-resource "aws_s3_bucket" "alb_logs_access" {
-  bucket        = local.log_access_bucket_name
-  force_destroy = false
+# ------------------------------------------------------------
+# KMS CMK for SQS (CMK required by scanners)
+# ------------------------------------------------------------
+resource "aws_kms_key" "sqs_sse" {
+  description             = "CMK for SQS encryption (${var.name_prefix})"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
 
-  tags = merge(var.tags, {
-    Name = "${var.name_prefix}-alb-logs-access"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "EnableRootPermissions"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      },
+      {
+        Sid       = "AllowSQSUseOfTheKey"
+        Effect    = "Allow"
+        Principal = { Service = "sqs.amazonaws.com" }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "aws:SourceAccount" = "${data.aws_caller_identity.current.account_id}"
+          }
+        }
+      }
+    ]
   })
 }
 
-resource "aws_s3_bucket_public_access_block" "alb_logs_access" {
-  bucket = aws_s3_bucket.alb_logs_access.id
-
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
+resource "aws_kms_alias" "sqs_sse" {
+  name          = "alias/${var.name_prefix}-sqs-cmk"
+  target_key_id = aws_kms_key.sqs_sse.key_id
 }
 
-resource "aws_s3_bucket_versioning" "alb_logs_access" {
-  bucket = aws_s3_bucket.alb_logs_access.id
-
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs_access" {
-  bucket = aws_s3_bucket.alb_logs_access.id
-
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm     = "aws:kms"
-      kms_master_key_id = aws_kms_key.alb_logs.arn
-    }
-  }
-}
-
-resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
-  bucket = aws_s3_bucket.alb_logs_access.id
-
-  rule {
-    id     = "log-lifecycle"
-    status = "Enabled"
-
-    filter { prefix = "" }
-
-    transition {
-      days          = var.lifecycle_glacier_days
-      storage_class = "GLACIER"
-    }
-
-    expiration {
-      days = var.lifecycle_expire_days
-    }
-
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
-    }
-  }
-}
-
-# ✅ tfsec aws-s3-enable-bucket-logging fixes:
-# 1) Log ALB logs bucket access to the access bucket
-resource "aws_s3_bucket_logging" "alb_logs" {
-  bucket        = aws_s3_bucket.alb_logs.id
-  target_bucket = aws_s3_bucket.alb_logs_access.id
-  target_prefix = "s3-access/${var.name_prefix}/alb-logs/"
-}
-
-# 2) ALSO enable access logging for the access bucket itself (send to alb_logs)
-resource "aws_s3_bucket_logging" "alb_logs_access" {
-  bucket        = aws_s3_bucket.alb_logs_access.id
-  target_bucket = aws_s3_bucket.alb_logs.id
-  target_prefix = "s3-access/${var.name_prefix}/alb-logs-access/"
-}
-
-# -------------------------------------------------------------
-# CloudWatch Log Group for VPC Flow Logs (encrypted with CMK)
-# -------------------------------------------------------------
-resource "aws_cloudwatch_log_group" "vpc_flow" {
-  name              = "/aws/vpc/flowlogs/${var.name_prefix}"
-  retention_in_days = var.flow_log_retention_days
-  kms_key_id        = aws_kms_key.alb_logs.arn
-
-  tags = merge(var.tags, {
-    Name = "${var.name_prefix}-vpc-flow"
-  })
-}
-
-# -------------------------------------------------------------
-# SQS queue used for S3 event notifications (encrypted with CMK)
-# -------------------------------------------------------------
+# ------------------------------------------------------------
+# CKV2_AWS_62: S3 event notifications enabled (SQS)
+# ------------------------------------------------------------
 resource "aws_sqs_queue" "alb_logs_events" {
   name              = "${var.name_prefix}-alb-logs-events"
-  kms_master_key_id = aws_kms_key.alb_logs.arn
+  kms_master_key_id = aws_kms_key.sqs_sse.arn
 
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-alb-logs-events"
   })
 }
 
-data "aws_iam_policy_document" "s3_to_sqs" {
+data "aws_iam_policy_document" "alb_logs_events_queue_policy" {
   statement {
-    sid    = "AllowS3SendMessage"
+    sid    = "AllowS3SendMessageFromAlbLogsBucket"
     effect = "Allow"
-
-    actions = ["sqs:SendMessage"]
 
     principals {
       type        = "Service"
       identifiers = ["s3.amazonaws.com"]
     }
 
+    actions   = ["sqs:SendMessage"]
     resources = [aws_sqs_queue.alb_logs_events.arn]
 
     condition {
       test     = "ArnEquals"
       variable = "aws:SourceArn"
-      values = [
-        aws_s3_bucket.alb_logs.arn,
-        aws_s3_bucket.alb_logs_access.arn
-      ]
+      values   = [aws_s3_bucket.alb_logs.arn]
+    }
+  }
+
+  statement {
+    sid    = "AllowS3SendMessageFromAlbLogsAccessBucket"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["s3.amazonaws.com"]
+    }
+
+    actions   = ["sqs:SendMessage"]
+    resources = [aws_sqs_queue.alb_logs_events.arn]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values   = [aws_s3_bucket.alb_logs_access.arn]
     }
   }
 }
 
 resource "aws_sqs_queue_policy" "alb_logs_events" {
   queue_url = aws_sqs_queue.alb_logs_events.id
-  policy    = data.aws_iam_policy_document.s3_to_sqs.json
+  policy    = data.aws_iam_policy_document.alb_logs_events_queue_policy.json
 }
 
-# ✅ Checkov CKV2_AWS_62 fix: enable event notifications on both buckets
 resource "aws_s3_bucket_notification" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
 
   queue {
-    queue_arn = aws_sqs_queue.alb_logs_events.arn
-    events    = ["s3:ObjectCreated:*"]
+    queue_arn     = aws_sqs_queue.alb_logs_events.arn
+    events        = ["s3:ObjectCreated:*"]
+    filter_prefix = "${var.alb_log_prefix}/"
   }
 
   depends_on = [aws_sqs_queue_policy.alb_logs_events]
@@ -339,4 +355,46 @@ resource "aws_s3_bucket_notification" "alb_logs_access" {
   }
 
   depends_on = [aws_sqs_queue_policy.alb_logs_events]
+}
+
+# ------------------------------------------------------------
+# KMS key for CloudWatch Log Groups
+# ------------------------------------------------------------
+resource "aws_kms_key" "cloudwatch_logs" {
+  description             = "KMS key for CloudWatch Logs (${var.name_prefix})"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "EnableRootPermissions"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      },
+      {
+        Sid       = "AllowCloudWatchLogsUse"
+        Effect    = "Allow"
+        Principal = { Service = "logs.${data.aws_region.current.id}.amazonaws.com" }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-cw-logs-kms" })
+}
+
+resource "aws_kms_alias" "cloudwatch_logs" {
+  name          = "alias/${var.name_prefix}-cw-logs"
+  target_key_id = aws_kms_key.cloudwatch_logs.key_id
 }
