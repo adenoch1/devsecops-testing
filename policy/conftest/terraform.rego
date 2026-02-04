@@ -13,22 +13,6 @@ after(rc) := a {
   a := rc.change.after
 }
 
-# IAM policy helpers
-has_policy(x) { not is_null(x.policy) }
-has_policy(x) { not is_null(x.assume_role_policy) }
-
-get_statements(x) := s {
-  not is_null(x.policy)
-  doc := json.unmarshal(x.policy)
-  s := doc.Statement
-}
-
-get_statements(x) := s {
-  not is_null(x.assume_role_policy)
-  doc := json.unmarshal(x.assume_role_policy)
-  s := doc.Statement
-}
-
 # -----------------------------
 # 1) Block public SSH (0.0.0.0/0 on port 22)
 # -----------------------------
@@ -65,6 +49,21 @@ deny[msg] {
 # -----------------------------
 # 2) IAM least privilege: deny wildcard actions/resources
 # -----------------------------
+has_policy(x) { not is_null(x.policy) }
+has_policy(x) { not is_null(x.assume_role_policy) }
+
+get_statements(x) := s {
+  not is_null(x.policy)
+  doc := json.unmarshal(x.policy)
+  s := doc.Statement
+}
+
+get_statements(x) := s {
+  not is_null(x.assume_role_policy)
+  doc := json.unmarshal(x.assume_role_policy)
+  s := doc.Statement
+}
+
 deny[msg] {
   rc := input.resource_changes[_]
   is_managed(rc)
@@ -97,6 +96,9 @@ deny[msg] {
 
 # -----------------------------
 # 3) S3 buckets must be encrypted (SSE-S3 or SSE-KMS)
+#    Support BOTH styles:
+#    - inline server_side_encryption_configuration on aws_s3_bucket
+#    - separate aws_s3_bucket_server_side_encryption_configuration resource
 # -----------------------------
 deny[msg] {
   rc := input.resource_changes[_]
@@ -104,23 +106,66 @@ deny[msg] {
   rc.type == "aws_s3_bucket"
 
   a := after(rc)
-  not has_sse(a)
+
+  not s3_bucket_encrypted(rc, a)
 
   msg := sprintf("S3: Bucket must be encrypted (SSE-S3 or SSE-KMS): %v", [rc.address])
 }
 
-has_sse(b) {
+s3_bucket_encrypted(rc, bucket_after) {
+  # Style A: Inline SSE block on aws_s3_bucket (some provider configs)
+  has_inline_sse(bucket_after)
+}
+
+s3_bucket_encrypted(rc, bucket_after) {
+  # Style B: Separate encryption config resource exists for this bucket
+  has_separate_sse_config_for_bucket(bucket_after)
+}
+
+has_inline_sse(b) {
   rule := b.server_side_encryption_configuration.rule[_]
   apply := rule.apply_server_side_encryption_by_default
   apply.sse_algorithm == "AES256"
 }
 
-has_sse(b) {
+has_inline_sse(b) {
   rule := b.server_side_encryption_configuration.rule[_]
   apply := rule.apply_server_side_encryption_by_default
   apply.sse_algorithm == "aws:kms"
 }
 
+has_separate_sse_config_for_bucket(bucket_after) {
+  # Find an aws_s3_bucket_server_side_encryption_configuration whose "bucket"
+  # matches this aws_s3_bucket's name/id in the plan
+  some i
+  rc2 := input.resource_changes[i]
+  is_managed(rc2)
+  rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
+
+  enc := rc2.change.after
+  enc.bucket == bucket_after.bucket
+
+  # Ensure it sets AES256 or aws:kms
+  rule := enc.rule[_]
+  apply := rule.apply_server_side_encryption_by_default
+  apply.sse_algorithm == "AES256"
+}
+
+has_separate_sse_config_for_bucket(bucket_after) {
+  some i
+  rc2 := input.resource_changes[i]
+  is_managed(rc2)
+  rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
+
+  enc := rc2.change.after
+  enc.bucket == bucket_after.bucket
+
+  rule := enc.rule[_]
+  apply := rule.apply_server_side_encryption_by_default
+  apply.sse_algorithm == "aws:kms"
+}
+
+# Public access blocks (kept)
 deny[msg] {
   rc := input.resource_changes[_]
   is_managed(rc)
