@@ -7,11 +7,13 @@ variable "aws_region" {
 variable "state_bucket_name" {
   description = "S3 bucket name for Terraform remote state (must be globally unique)"
   type        = string
+  default     = "devsecops-testing-tfstate-enoch-2026"
 }
 
 variable "lock_table_name" {
   description = "DynamoDB table name for Terraform state locking"
   type        = string
+  default     = "devsecops-testing-tflocks"
 }
 
 variable "tags" {
