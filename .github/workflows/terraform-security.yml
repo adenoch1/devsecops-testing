@@ -61,25 +61,19 @@ jobs:
 
       - name: Ensure tfvars exists for tfsec
         run: |
-          # If terraform.tfvars is not committed in this repo (common), create a scan-only tfvars file
           if [ -f terraform.tfvars ]; then
             echo "Found terraform.tfvars in $(pwd)"
             ls -la terraform.tfvars
           else
             echo "terraform.tfvars not found in $(pwd). Creating .tfsec.auto.tfvars for scanning..."
-            cat > .tfsec.auto.tfvars <<'EOF'
-aws_region = "ca-central-1"
-project    = "devsecops-testing"
-environment = "dev"
-owner      = "enoch"
-
-# Required values (set reasonable demo defaults for scanning)
-vpc_cidr = "192.168.0.0/16"
-
-# If your code requires ACM ARN for listener resources, keep a placeholder.
-# tfsec only needs values to evaluate expressions (it will not create resources).
-acm_certificate_arn = "arn:aws:acm:ca-central-1:000000000000:certificate/00000000-0000-0000-0000-000000000000"
-EOF
+            printf '%s\n' \
+              'aws_region = "ca-central-1"' \
+              'project = "devsecops-testing"' \
+              'environment = "dev"' \
+              'owner = "enoch"' \
+              'vpc_cidr = "192.168.0.0/16"' \
+              'acm_certificate_arn = "arn:aws:acm:ca-central-1:000000000000:certificate/00000000-0000-0000-0000-000000000000"' \
+              > .tfsec.auto.tfvars
             ls -la .tfsec.auto.tfvars
           fi
 
