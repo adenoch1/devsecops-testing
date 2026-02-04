@@ -24,6 +24,17 @@ bucket_id(b) := "" { not b.id }
 bucket_name(b) := n { n := b.bucket }
 bucket_name(b) := "" { not b.bucket }
 
+# Normalize nested block shapes across Terraform JSON versions:
+# Sometimes apply_server_side_encryption_by_default is an object,
+# sometimes it's a list with 1 object.
+sse_apply(rule) := apply {
+  apply := rule.apply_server_side_encryption_by_default
+}
+
+sse_apply(rule) := apply {
+  apply := rule.apply_server_side_encryption_by_default[_]
+}
+
 # -----------------------------
 # 1) Block public SSH (0.0.0.0/0 on port 22)
 # -----------------------------
@@ -125,15 +136,16 @@ encryption_points_to_bucket(enc, b) {
 }
 
 # SSE algorithm checks (no "or" to avoid parser issues)
+# Handles apply_server_side_encryption_by_default as object OR list.
 sse_alg_ok(enc) {
   rule := enc.rule[_]
-  apply := rule.apply_server_side_encryption_by_default
+  apply := sse_apply(rule)
   apply.sse_algorithm == "AES256"
 }
 
 sse_alg_ok(enc) {
   rule := enc.rule[_]
-  apply := rule.apply_server_side_encryption_by_default
+  apply := sse_apply(rule)
   apply.sse_algorithm == "aws:kms"
 }
 
