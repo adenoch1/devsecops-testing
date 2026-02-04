@@ -1,9 +1,5 @@
 package terraform.security
 
-# IMPORTANT:
-# - Do NOT define `default deny := []` here.
-# - Use only `deny[msg]` rules (partial set rules) so multiple rules can coexist.
-
 # -----------------------------
 # Helpers
 # -----------------------------
@@ -47,7 +43,7 @@ deny[msg] {
 }
 
 # -----------------------------
-# 2) S3 buckets must be encrypted
+# 2) S3 buckets must be encrypted (SSE-S3 or SSE-KMS)
 # (match separate SSE resource by address)
 # -----------------------------
 deny[msg] {
@@ -74,31 +70,64 @@ deny[msg] {
   msg := sprintf("S3: Bucket must be encrypted (SSE-S3 or SSE-KMS): %v", [bucket_addr])
 }
 
-# Accept AES256 or aws:kms, and handle indexed resources like [0]
+# -------------------------------------------------
+# SSE ok: non-indexed address + AES256
+# -------------------------------------------------
 sse_ok_for_addr(expected) {
   some i
   rc2 := input.resource_changes[i]
   is_managed(rc2)
   rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
 
-  addr := rc2.address
-  addr == expected
+  rc2.address == expected
 
   alg := rc2.change.after.rule[_].apply_server_side_encryption_by_default.sse_algorithm
-  alg == "AES256" or alg == "aws:kms"
+  alg == "AES256"
 }
 
+# -------------------------------------------------
+# SSE ok: non-indexed address + aws:kms
+# -------------------------------------------------
 sse_ok_for_addr(expected) {
   some i
   rc2 := input.resource_changes[i]
   is_managed(rc2)
   rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
 
-  addr := rc2.address
-  startswith(addr, sprintf("%s[", [expected]))
+  rc2.address == expected
 
   alg := rc2.change.after.rule[_].apply_server_side_encryption_by_default.sse_algorithm
-  alg == "AES256" or alg == "aws:kms"
+  alg == "aws:kms"
+}
+
+# -------------------------------------------------
+# SSE ok: indexed address (e.g. ...[0]) + AES256
+# -------------------------------------------------
+sse_ok_for_addr(expected) {
+  some i
+  rc2 := input.resource_changes[i]
+  is_managed(rc2)
+  rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
+
+  startswith(rc2.address, sprintf("%s[", [expected]))
+
+  alg := rc2.change.after.rule[_].apply_server_side_encryption_by_default.sse_algorithm
+  alg == "AES256"
+}
+
+# -------------------------------------------------
+# SSE ok: indexed address (e.g. ...[0]) + aws:kms
+# -------------------------------------------------
+sse_ok_for_addr(expected) {
+  some i
+  rc2 := input.resource_changes[i]
+  is_managed(rc2)
+  rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
+
+  startswith(rc2.address, sprintf("%s[", [expected]))
+
+  alg := rc2.change.after.rule[_].apply_server_side_encryption_by_default.sse_algorithm
+  alg == "aws:kms"
 }
 
 # -----------------------------
