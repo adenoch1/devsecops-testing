@@ -99,7 +99,7 @@ deny[msg] {
 #    Support:
 #    A) Inline SSE on aws_s3_bucket
 #    B) Separate aws_s3_bucket_server_side_encryption_configuration
-#       matched by address naming (most reliable in plan JSON)
+#       including indexed resources (e.g. ...alb_logs[0])
 # -----------------------------
 deny[msg] {
   rc := input.resource_changes[_]
@@ -134,53 +134,49 @@ has_inline_sse(b) {
   apply.sse_algorithm == "aws:kms"
 }
 
-# Separate SSE config resource exists with same logical name as the bucket:
-#   module.logging.aws_s3_bucket.alb_logs
-#   module.logging.aws_s3_bucket_server_side_encryption_configuration.alb_logs
-has_matching_sse_resource(bucket_rc) {
-  expected := sprintf("%s_server_side_encryption_configuration%s", [
-    "aws_s3_bucket",
-    substring(bucket_rc.address, count(bucket_rc.address) - count(trim_prefix(bucket_rc.address, "module.logging.")), count(bucket_rc.address))
-  ])
-  # The above line is too clever for OPA. We'll implement it more directly below.
-  false
-}
-
-# A simpler and robust approach:
-# Build the expected SSE address by replacing the type portion in the address.
+# Build expected SSE resource address from bucket address
+# module.logging.aws_s3_bucket.alb_logs
+# -> module.logging.aws_s3_bucket_server_side_encryption_configuration.alb_logs
 expected_sse_address(bucket_addr) := sse_addr {
-  # Replace ".aws_s3_bucket." with ".aws_s3_bucket_server_side_encryption_configuration."
   sse_addr := replace(bucket_addr, ".aws_s3_bucket.", ".aws_s3_bucket_server_side_encryption_configuration.")
 }
 
+# Match SSE resource address exactly OR as an indexed address like "...alb_logs[0]"
+address_matches_expected(actual, expected) {
+  actual == expected
+}
+
+address_matches_expected(actual, expected) {
+  startswith(actual, sprintf("%s[", [expected]))
+}
+
 has_matching_sse_resource(bucket_rc) {
-  sse_addr := expected_sse_address(bucket_rc.address)
+  expected := expected_sse_address(bucket_rc.address)
 
   some i
   rc2 := input.resource_changes[i]
   is_managed(rc2)
   rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
-  rc2.address == sse_addr
+
+  address_matches_expected(rc2.address, expected)
 
   enc := rc2.change.after
-
-  # Ensure it sets AES256 or aws:kms
   rule := enc.rule[_]
   apply := rule.apply_server_side_encryption_by_default
   apply.sse_algorithm == "AES256"
 }
 
 has_matching_sse_resource(bucket_rc) {
-  sse_addr := expected_sse_address(bucket_rc.address)
+  expected := expected_sse_address(bucket_rc.address)
 
   some i
   rc2 := input.resource_changes[i]
   is_managed(rc2)
   rc2.type == "aws_s3_bucket_server_side_encryption_configuration"
-  rc2.address == sse_addr
+
+  address_matches_expected(rc2.address, expected)
 
   enc := rc2.change.after
-
   rule := enc.rule[_]
   apply := rule.apply_server_side_encryption_by_default
   apply.sse_algorithm == "aws:kms"
