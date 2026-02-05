@@ -65,6 +65,7 @@ resource "aws_s3_bucket_versioning" "alb_logs" {
   }
 }
 
+# ✅ CKV_AWS_300 fixed: add abort_incomplete_multipart_upload
 resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
 
@@ -72,7 +73,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
     id     = "expire-alb-logs"
     status = "Enabled"
 
-    # ✅ CKV_AWS_300: abort incomplete multipart uploads
     abort_incomplete_multipart_upload {
       days_after_initiation = 7
     }
@@ -128,6 +128,7 @@ resource "aws_s3_bucket_versioning" "alb_logs_access" {
   }
 }
 
+# ✅ CKV_AWS_300 fixed: add abort_incomplete_multipart_upload
 resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
   bucket = aws_s3_bucket.alb_logs_access.id
 
@@ -135,7 +136,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
     id     = "expire-access-logs"
     status = "Enabled"
 
-    # ✅ CKV_AWS_300: abort incomplete multipart uploads
     abort_incomplete_multipart_upload {
       days_after_initiation = 7
     }
@@ -213,6 +213,7 @@ resource "aws_s3_bucket_policy" "alb_logs" {
 
 # ------------------------------------------------------------
 # KMS key for SQS encryption (used by S3 event notifications)
+# ✅ FIX: add CreateGrant + ViaService + CallerAccount + GrantIsForAWSResource
 # ------------------------------------------------------------
 resource "aws_kms_key" "sqs_sse" {
   description             = "CMK for SQS encryption (${var.name_prefix})"
@@ -237,6 +238,7 @@ resource "aws_kms_key" "sqs_sse" {
           "kms:Encrypt",
           "kms:Decrypt",
           "kms:ReEncrypt*",
+          "kms:GenerateDataKey",
           "kms:GenerateDataKey*",
           "kms:DescribeKey",
           "kms:CreateGrant",
@@ -246,7 +248,7 @@ resource "aws_kms_key" "sqs_sse" {
         Resource = "*"
         Condition = {
           StringEquals = {
-            "kms:ViaService"    = "sqs.${data.aws_region.current.id}.amazonaws.com"
+            "kms:ViaService"    = "sqs.${data.aws_region.current.name}.amazonaws.com",
             "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
           }
           Bool = {
@@ -256,6 +258,10 @@ resource "aws_kms_key" "sqs_sse" {
       }
     ]
   })
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-sqs-cmk"
+  })
 }
 
 resource "aws_kms_alias" "sqs_sse" {
@@ -263,6 +269,9 @@ resource "aws_kms_alias" "sqs_sse" {
   target_key_id = aws_kms_key.sqs_sse.key_id
 }
 
+# ------------------------------------------------------------
+# SQS queue for S3 event notifications
+# ------------------------------------------------------------
 resource "aws_sqs_queue" "alb_logs_events" {
   name              = "${var.name_prefix}-alb-logs-events"
   kms_master_key_id = aws_kms_key.sqs_sse.arn
@@ -272,6 +281,7 @@ resource "aws_sqs_queue" "alb_logs_events" {
   })
 }
 
+# ✅ FIX: add SourceAccount to both statements (helps validation + best practice)
 data "aws_iam_policy_document" "alb_logs_events_queue_policy" {
   statement {
     sid    = "AllowS3SendMessageFromAlbLogsBucket"
@@ -329,6 +339,10 @@ resource "aws_sqs_queue_policy" "alb_logs_events" {
   policy    = data.aws_iam_policy_document.alb_logs_events_queue_policy.json
 }
 
+# ------------------------------------------------------------
+# S3 bucket notifications -> SQS
+# ✅ FIX: depend on queue + policy + KMS alias to avoid eventual consistency
+# ------------------------------------------------------------
 resource "aws_s3_bucket_notification" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
 
@@ -339,6 +353,7 @@ resource "aws_s3_bucket_notification" "alb_logs" {
   }
 
   depends_on = [
+    aws_kms_alias.sqs_sse,
     aws_sqs_queue.alb_logs_events,
     aws_sqs_queue_policy.alb_logs_events
   ]
@@ -353,6 +368,7 @@ resource "aws_s3_bucket_notification" "alb_logs_access" {
   }
 
   depends_on = [
+    aws_kms_alias.sqs_sse,
     aws_sqs_queue.alb_logs_events,
     aws_sqs_queue_policy.alb_logs_events
   ]
