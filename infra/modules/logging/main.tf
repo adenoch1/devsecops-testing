@@ -7,7 +7,7 @@ locals {
 }
 
 # -------------------------------------------------------------
-# KMS CMK for ALB Logs bucket encryption (source region)
+# KMS CMK for ALB Logs bucket encryption (S3)
 # -------------------------------------------------------------
 resource "aws_kms_key" "alb_logs" {
   description             = "CMK for ALB logs buckets (${var.name_prefix})"
@@ -63,7 +63,6 @@ resource "aws_s3_bucket_versioning" "alb_logs_access" {
   }
 }
 
-# SSE (separate resource) ✅ avoids deprecated inline server_side_encryption_configuration
 resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs_access" {
   bucket = aws_s3_bucket.alb_logs_access.id
 
@@ -75,7 +74,6 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs_access" 
   }
 }
 
-# Lifecycle (fixed) ✅ no unsupported arguments
 resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
   bucket = aws_s3_bucket.alb_logs_access.id
 
@@ -107,7 +105,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
 # ------------------------------------------------------------
 # Main ALB Logs bucket (the bucket ALB writes to)
 # ------------------------------------------------------------
-#checkov:skip=CKV_AWS_144: "Cross-region replication intentionally disabled for this environment"
 resource "aws_s3_bucket" "alb_logs" {
   bucket        = local.log_bucket_name
   force_destroy = true
@@ -172,7 +169,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
   }
 }
 
-# Server access logging: ALB logs bucket -> access logs bucket
 resource "aws_s3_bucket_logging" "alb_logs" {
   bucket        = aws_s3_bucket.alb_logs.id
   target_bucket = aws_s3_bucket.alb_logs_access.id
@@ -241,9 +237,9 @@ resource "aws_kms_key" "sqs_sse" {
   deletion_window_in_days = 7
   enable_key_rotation     = true
 
-  # NOTE: S3 validates SQS destinations by sending a test message.
-  # When the queue is SSE-KMS encrypted with a CMK, SQS must be able to create grants
-  # and use the key via the regional SQS service endpoint.
+  # NOTE:
+  # S3 validates SQS destinations; with SSE-KMS CMK the queue must be usable immediately.
+  # This policy allows SQS to use and create grants via the regional SQS service.
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -272,7 +268,7 @@ resource "aws_kms_key" "sqs_sse" {
         Resource = "*"
         Condition = {
           StringEquals = {
-            "kms:ViaService"    = "sqs.${data.aws_region.current.name}.amazonaws.com",
+            "kms:ViaService"    = "sqs.${data.aws_region.current.id}.amazonaws.com",
             "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
           }
           Bool = {
@@ -303,10 +299,10 @@ resource "aws_sqs_queue" "alb_logs_events" {
   })
 }
 
-# ✅ Queue policy (THIS is required for S3 destination validation)
+# ✅ Queue policy (expanded to include GetQueueAttributes for S3 validation)
 data "aws_iam_policy_document" "alb_logs_events_queue_policy" {
   statement {
-    sid    = "AllowS3SendMessageFromAlbLogsBucket"
+    sid    = "AllowS3UseQueueFromAlbLogsBucket"
     effect = "Allow"
 
     principals {
@@ -314,7 +310,11 @@ data "aws_iam_policy_document" "alb_logs_events_queue_policy" {
       identifiers = ["s3.amazonaws.com"]
     }
 
-    actions   = ["sqs:SendMessage"]
+    actions = [
+      "sqs:SendMessage",
+      "sqs:GetQueueAttributes"
+    ]
+
     resources = [aws_sqs_queue.alb_logs_events.arn]
 
     condition {
@@ -331,7 +331,7 @@ data "aws_iam_policy_document" "alb_logs_events_queue_policy" {
   }
 
   statement {
-    sid    = "AllowS3SendMessageFromAlbLogsAccessBucket"
+    sid    = "AllowS3UseQueueFromAlbLogsAccessBucket"
     effect = "Allow"
 
     principals {
@@ -339,7 +339,11 @@ data "aws_iam_policy_document" "alb_logs_events_queue_policy" {
       identifiers = ["s3.amazonaws.com"]
     }
 
-    actions   = ["sqs:SendMessage"]
+    actions = [
+      "sqs:SendMessage",
+      "sqs:GetQueueAttributes"
+    ]
+
     resources = [aws_sqs_queue.alb_logs_events.arn]
 
     condition {
@@ -361,11 +365,11 @@ resource "aws_sqs_queue_policy" "alb_logs_events" {
   policy    = data.aws_iam_policy_document.alb_logs_events_queue_policy.json
 }
 
-# ✅ IMPORTANT: AWS propagation delay (fixes the “Unable to validate destination” 400)
+# ✅ Stronger propagation delay for CI/CD consistency
 resource "time_sleep" "wait_for_sqs_policy" {
-  create_duration = "30s"
-
+  create_duration = "120s"
   depends_on = [
+    aws_kms_alias.sqs_sse,
     aws_sqs_queue.alb_logs_events,
     aws_sqs_queue_policy.alb_logs_events
   ]
@@ -418,7 +422,7 @@ resource "aws_kms_key" "cloudwatch_logs" {
       {
         Sid       = "AllowCloudWatchLogsUse"
         Effect    = "Allow"
-        Principal = { Service = "logs.${data.aws_region.current.name}.amazonaws.com" }
+        Principal = { Service = "logs.${data.aws_region.current.id}.amazonaws.com" }
         Action = [
           "kms:Encrypt",
           "kms:Decrypt",
