@@ -229,9 +229,9 @@ resource "aws_s3_bucket_policy" "alb_logs" {
   policy = data.aws_iam_policy_document.alb_logs_bucket_policy.json
 }
 
-# ------------------------------------------------------------
+# -----------------------------------------------------------
 # KMS CMK for SQS encryption (required by CKV2_AWS_73)
-# ------------------------------------------------------------
+# -----------------------------------------------------------
 resource "aws_kms_key" "sqs_sse" {
   description             = "CMK for SQS encryption (${var.name_prefix})"
   deletion_window_in_days = 7
