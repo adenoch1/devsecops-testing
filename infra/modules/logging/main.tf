@@ -246,7 +246,7 @@ resource "aws_kms_key" "sqs_sse" {
         Resource = "*"
         Condition = {
           StringEquals = {
-            "kms:ViaService"    = "sqs.${data.aws_region.current.name}.amazonaws.com"
+            "kms:ViaService"    = "sqs.${data.aws_region.current.id}.amazonaws.com"
             "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
           }
           Bool = {
@@ -338,7 +338,10 @@ resource "aws_s3_bucket_notification" "alb_logs" {
     filter_prefix = "${var.alb_log_prefix}/"
   }
 
-  depends_on = [aws_sqs_queue_policy.alb_logs_events]
+  depends_on = [
+    aws_sqs_queue.alb_logs_events,
+    aws_sqs_queue_policy.alb_logs_events
+  ]
 }
 
 resource "aws_s3_bucket_notification" "alb_logs_access" {
@@ -349,7 +352,10 @@ resource "aws_s3_bucket_notification" "alb_logs_access" {
     events    = ["s3:ObjectCreated:*"]
   }
 
-  depends_on = [aws_sqs_queue_policy.alb_logs_events]
+  depends_on = [
+    aws_sqs_queue.alb_logs_events,
+    aws_sqs_queue_policy.alb_logs_events
+  ]
 }
 
 # ------------------------------------------------------------
