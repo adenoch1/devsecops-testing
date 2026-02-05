@@ -65,7 +65,6 @@ resource "aws_s3_bucket_versioning" "alb_logs" {
   }
 }
 
-# ✅ CKV_AWS_300 fixed: add abort_incomplete_multipart_upload
 resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
 
@@ -73,6 +72,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
     id     = "expire-alb-logs"
     status = "Enabled"
 
+    # CKV_AWS_300: abort incomplete multipart uploads
     abort_incomplete_multipart_upload {
       days_after_initiation = 7
     }
@@ -128,7 +128,6 @@ resource "aws_s3_bucket_versioning" "alb_logs_access" {
   }
 }
 
-# ✅ CKV_AWS_300 fixed: add abort_incomplete_multipart_upload
 resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
   bucket = aws_s3_bucket.alb_logs_access.id
 
@@ -136,6 +135,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
     id     = "expire-access-logs"
     status = "Enabled"
 
+    # CKV_AWS_300: abort incomplete multipart uploads
     abort_incomplete_multipart_upload {
       days_after_initiation = 7
     }
@@ -212,8 +212,8 @@ resource "aws_s3_bucket_policy" "alb_logs" {
 }
 
 # ------------------------------------------------------------
-# KMS key for SQS encryption (used by S3 event notifications)
-# ✅ FIX: add CreateGrant + ViaService + CallerAccount + GrantIsForAWSResource
+# KMS CMK for SQS encryption (required by CKV2_AWS_73)
+# ✅ Slightly more permissive for stability of S3->SQS destination validation
 # ------------------------------------------------------------
 resource "aws_kms_key" "sqs_sse" {
   description             = "CMK for SQS encryption (${var.name_prefix})"
@@ -246,15 +246,6 @@ resource "aws_kms_key" "sqs_sse" {
           "kms:RevokeGrant"
         ]
         Resource = "*"
-        Condition = {
-          StringEquals = {
-            "kms:ViaService"    = "sqs.${data.aws_region.current.name}.amazonaws.com",
-            "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
-          }
-          Bool = {
-            "kms:GrantIsForAWSResource" = "true"
-          }
-        }
       }
     ]
   })
@@ -270,7 +261,7 @@ resource "aws_kms_alias" "sqs_sse" {
 }
 
 # ------------------------------------------------------------
-# SQS queue for S3 event notifications
+# SQS queue for S3 event notifications (encrypted with CMK)
 # ------------------------------------------------------------
 resource "aws_sqs_queue" "alb_logs_events" {
   name              = "${var.name_prefix}-alb-logs-events"
@@ -281,7 +272,7 @@ resource "aws_sqs_queue" "alb_logs_events" {
   })
 }
 
-# ✅ FIX: add SourceAccount to both statements (helps validation + best practice)
+# SQS queue policy: allow S3 to send messages from both buckets
 data "aws_iam_policy_document" "alb_logs_events_queue_policy" {
   statement {
     sid    = "AllowS3SendMessageFromAlbLogsBucket"
@@ -341,7 +332,7 @@ resource "aws_sqs_queue_policy" "alb_logs_events" {
 
 # ------------------------------------------------------------
 # S3 bucket notifications -> SQS
-# ✅ FIX: depend on queue + policy + KMS alias to avoid eventual consistency
+# ✅ Depend on KMS alias + queue + queue policy
 # ------------------------------------------------------------
 resource "aws_s3_bucket_notification" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
