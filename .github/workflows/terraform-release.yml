@@ -15,30 +15,35 @@ on:
         required: true
         default: "deploy"
         type: choice
-        options:
-          - deploy
-          - destroy
+        options: [deploy, destroy]
+
+      image_tag:
+        description: "Container image tag to deploy (e.g., a git SHA). Leave empty to keep current."
+        required: false
+        default: ""
+
       two_step_apply:
         description: "Use two-step apply (prime S3->SQS prereqs, then full apply)"
         required: true
         default: "true"
         type: choice
-        options:
-          - "true"
-          - "false"
+        options: ["true", "false"]
+
       teardown_after_test:
-        description: "Destroy infra after DNS smoke test (recommended for testing)"
+        description: "Destroy infra after smoke test (for temporary testing)"
         required: true
-        default: "true"
+        default: "false"
         type: choice
-        options:
-          - "true"
-          - "false"
+        options: ["true", "false"]
+
       smoke_path:
-        description: "HTTP path to test on the ALB (example: /health or /)"
+        description: "Path to test on the ALB (example: /health or /)"
         required: true
-        default: "/"
+        default: "/health"
         type: string
+
+  repository_dispatch:
+    types: [terraform-deploy]
 
 permissions:
   id-token: write
@@ -46,7 +51,7 @@ permissions:
 
 concurrency:
   group: terraform-release-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   TF_IN_AUTOMATION: "true"
@@ -56,11 +61,14 @@ env:
 
 jobs:
   ############################################################
-  # DEV (Deploy / Apply)
+  # DEPLOY (dev)
   ############################################################
   deploy:
     name: Deploy (dev)
-    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.action == 'deploy') }}
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'deploy') ||
+      (github.event_name == 'repository_dispatch' && github.event.action == 'terraform-deploy')
     runs-on: ubuntu-latest
     environment: dev
 
@@ -75,14 +83,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # OIDC Auth (from GitHub Environment secrets)
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # Hard verification: if this fails, your role ARN/region/trust policy is wrong
       - name: Verify AWS identity (STS)
         run: aws sts get-caller-identity
 
@@ -94,52 +100,75 @@ jobs:
       - name: Terraform init
         run: terraform init -input=false
 
-      # Decide two-step strategy:
-      # - Push to main: default false (fast path)
-      # - Manual run: obey input two_step_apply
-      - name: Determine apply strategy
-        id: strategy
+      - name: Resolve inputs (image_tag / smoke_path / teardown / two_step)
+        id: resolved
+        shell: bash
         run: |
           set -euo pipefail
 
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "two_step=${{ inputs.two_step_apply }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "two_step=false" >> "$GITHUB_OUTPUT"
+          # Defaults (manual)
+          ACTION="deploy"
+          IMAGE_TAG="${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || '' }}"
+          SMOKE_PATH="${{ github.event_name == 'workflow_dispatch' && inputs.smoke_path || '/health' }}"
+          TEARDOWN="${{ github.event_name == 'workflow_dispatch' && inputs.teardown_after_test || 'false' }}"
+          TWO_STEP="${{ github.event_name == 'workflow_dispatch' && inputs.two_step_apply || 'true' }}"
+
+          # If triggered by repository_dispatch from 03-release.yml, override from payload
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            ACTION="${{ github.event.client_payload.action }}"
+            IMAGE_TAG="${{ github.event.client_payload.image_tag }}"
+            SMOKE_PATH="${{ github.event.client_payload.smoke_path }}"
+            TEARDOWN="${{ github.event.client_payload.teardown_after_test }}"
+            TWO_STEP="${{ github.event.client_payload.two_step_apply }}"
           fi
 
-      # Fast path plan/apply
+          echo "action=$ACTION" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "smoke_path=$SMOKE_PATH" >> "$GITHUB_OUTPUT"
+          echo "teardown=$TEARDOWN" >> "$GITHUB_OUTPUT"
+          echo "two_step=$TWO_STEP" >> "$GITHUB_OUTPUT"
+
+          echo "Resolved:"
+          echo "  action=$ACTION"
+          echo "  image_tag=$IMAGE_TAG"
+          echo "  smoke_path=$SMOKE_PATH"
+          echo "  teardown=$TEARDOWN"
+          echo "  two_step=$TWO_STEP"
+
       - name: Terraform plan (full)
         id: plan_full
-        run: terraform plan -out=tfplan.binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ steps.resolved.outputs.image_tag }}" ]; then
+            terraform plan -out=tfplan.binary -var="image_tag=${{ steps.resolved.outputs.image_tag }}"
+          else
+            terraform plan -out=tfplan.binary
+          fi
 
       - name: Terraform apply (full - fast path)
         id: apply_full
         continue-on-error: true
         run: terraform apply -auto-approve tfplan.binary
 
-      # If fast apply failed, detect known S3 destination validation error
       - name: Detect S3 destination validation error
         id: detect_s3_validation
         if: ${{ steps.apply_full.outcome == 'failure' }}
         run: |
           set -euo pipefail
           terraform apply -auto-approve tfplan.binary 2>tf_err.log || true
-
           if grep -q "Unable to validate the following destination configurations" tf_err.log; then
             echo "hit_validation=true" >> "$GITHUB_OUTPUT"
           else
             echo "hit_validation=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Two-step apply (manual requested OR fast-path hit the known validation issue)
       - name: Terraform apply (step 1 - prime S3->SQS prereqs)
         if: |
-          (github.event_name == 'workflow_dispatch' && steps.strategy.outputs.two_step == 'true') ||
+          steps.resolved.outputs.two_step == 'true' &&
           (steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true')
         run: |
           set -euo pipefail
-
           terraform apply -auto-approve \
             -target=module.logging.aws_kms_key.sqs_sse \
             -target=module.logging.aws_kms_alias.sqs_sse \
@@ -155,27 +184,31 @@ jobs:
             -target=module.logging.aws_s3_bucket_versioning.alb_logs \
             -target=module.logging.aws_s3_bucket_versioning.alb_logs_access
 
-      - name: Wait for AWS propagation (SQS policy / KMS grants)
+      - name: Wait for AWS propagation
         if: |
-          (github.event_name == 'workflow_dispatch' && steps.strategy.outputs.two_step == 'true') ||
+          steps.resolved.outputs.two_step == 'true' &&
           (steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true')
-        run: |
-          echo "Waiting for AWS propagation..."
-          sleep 120
+        run: sleep 120
 
       - name: Terraform plan (full - after prime)
         if: |
-          (github.event_name == 'workflow_dispatch' && steps.strategy.outputs.two_step == 'true') ||
+          steps.resolved.outputs.two_step == 'true' &&
           (steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true')
-        run: terraform plan -out=tfplan2.binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ steps.resolved.outputs.image_tag }}" ]; then
+            terraform plan -out=tfplan2.binary -var="image_tag=${{ steps.resolved.outputs.image_tag }}"
+          else
+            terraform plan -out=tfplan2.binary
+          fi
 
       - name: Terraform apply (full - after prime)
         if: |
-          (github.event_name == 'workflow_dispatch' && steps.strategy.outputs.two_step == 'true') ||
+          steps.resolved.outputs.two_step == 'true' &&
           (steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true')
         run: terraform apply -auto-approve tfplan2.binary
 
-      # If fast path failed and it was NOT the known S3 validation issue, fail hard
       - name: Fail if apply failed for unknown reason
         if: ${{ steps.apply_full.outcome == 'failure' && (steps.detect_s3_validation.outputs.hit_validation != 'true') }}
         run: |
@@ -187,10 +220,11 @@ jobs:
         run: |
           echo "alb_dns_name=$(terraform output -raw alb_dns_name)" >> "$GITHUB_OUTPUT"
 
-      - name: Show ALB DNS name
+      - name: Show ALB URL
         run: |
-          echo "ALB DNS NAME:"
-          echo "${{ steps.tf_outputs.outputs.alb_dns_name }}"
+          echo "ALB DNS: ${{ steps.tf_outputs.outputs.alb_dns_name }}"
+          echo "Test HTTPS: https://${{ steps.tf_outputs.outputs.alb_dns_name }}${{ steps.resolved.outputs.smoke_path }}"
+          echo "Test HTTP : http://${{ steps.tf_outputs.outputs.alb_dns_name }}${{ steps.resolved.outputs.smoke_path }}"
 
   ############################################################
   # DNS (Smoke Test) - environment gate
@@ -198,31 +232,43 @@ jobs:
   dns:
     name: DNS Smoke Test
     needs: deploy
-    if: ${{ needs.deploy.result == 'success' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.action == 'deploy')) }}
+    if: ${{ needs.deploy.result == 'success' }}
     runs-on: ubuntu-latest
     environment: dns
 
     steps:
       - name: Show ALB DNS
-        run: |
-          echo "ALB DNS: ${{ needs.deploy.outputs.alb_dns_name }}"
+        run: echo "ALB DNS: ${{ needs.deploy.outputs.alb_dns_name }}"
 
       - name: Wait for ALB propagation
         run: sleep 60
 
-      - name: Smoke test over HTTP (ALB)
+      - name: Smoke test (HTTPS first, then HTTP)
         run: |
           set -euo pipefail
-          URL="http://${{ needs.deploy.outputs.alb_dns_name }}${{ github.event_name == 'workflow_dispatch' && inputs.smoke_path || '/' }}"
-          echo "Testing: $URL"
-          # We accept 200/301/302 because many stacks redirect HTTP->HTTPS
-          code=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true)
-          echo "HTTP status: $code"
-          if [ "$code" != "200" ] && [ "$code" != "301" ] && [ "$code" != "302" ]; then
-            echo "Smoke test failed (expected 200/301/302)."
-            exit 1
+          PATH_ONLY="/health"
+
+          HTTPS_URL="https://${{ needs.deploy.outputs.alb_dns_name }}${PATH_ONLY}"
+          HTTP_URL="http://${{ needs.deploy.outputs.alb_dns_name }}${PATH_ONLY}"
+
+          echo "Testing HTTPS: $HTTPS_URL"
+          code=$(curl -k -s -o /dev/null -w "%{http_code}" "$HTTPS_URL" || true)
+          echo "HTTPS status: $code"
+          if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; then
+            echo "Smoke test passed on HTTPS."
+            exit 0
           fi
-          echo "Smoke test passed."
+
+          echo "Testing HTTP: $HTTP_URL"
+          code=$(curl -s -o /dev/null -w "%{http_code}" "$HTTP_URL" || true)
+          echo "HTTP status: $code"
+          if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; then
+            echo "Smoke test passed on HTTP."
+            exit 0
+          fi
+
+          echo "Smoke test failed (expected 200/301/302)."
+          exit 1
 
   ##########################################################
   # DESTROY (cleanup) - environment gate
@@ -230,7 +276,9 @@ jobs:
   destroy:
     name: Destroy (dev)
     needs: dns
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.action == 'destroy' || inputs.teardown_after_test == 'true') }}
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      (inputs.action == 'destroy' || inputs.teardown_after_test == 'true')
     runs-on: ubuntu-latest
     environment: destroy
 
