@@ -72,6 +72,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
     id     = "expire-alb-logs"
     status = "Enabled"
 
+    # ✅ CKV_AWS_300: abort incomplete multipart uploads
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
     expiration {
       days = var.flow_log_retention_days
     }
@@ -129,6 +134,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
   rule {
     id     = "expire-access-logs"
     status = "Enabled"
+
+    # ✅ CKV_AWS_300: abort incomplete multipart uploads
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
 
     expiration {
       days = var.flow_log_retention_days
