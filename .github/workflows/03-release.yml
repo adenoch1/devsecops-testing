@@ -5,7 +5,6 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
-# OIDC to AWS needs id-token: write
 permissions:
   contents: read
   id-token: write
@@ -18,32 +17,25 @@ jobs:
   build_push_ecr:
     name: Build + Scan + Push (ECR)
     runs-on: ubuntu-latest
-
-    # IMPORTANT:
-    # This lets the job read Environment secrets like AWS_ROLE_ARN and AWS_REGION
     environment: dev
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      # 1) Authenticate to AWS using GitHub OIDC (NO static keys)
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Verify AWS identity (debug)
+      - name: Verify AWS identity
         run: aws sts get-caller-identity
 
-      # 2) Login to Amazon ECR (sets docker login for the registry)
       - name: Login to Amazon ECR
         id: ecr_login
         uses: aws-actions/amazon-ecr-login@v2
 
-      # 3) Derive the ECR repo name from your terraform.tfvars (project + environment)
-      #    Your Terraform creates: "${name_prefix}-repo" where name_prefix = "${project}-${environment}"
       - name: Compute ECR image URI
         id: image
         shell: bash
@@ -51,8 +43,6 @@ jobs:
           set -euo pipefail
 
           TFVARS="infra/envs/dev/terraform.tfvars"
-
-          # Extract project/environment from terraform.tfvars (expects: project = "..." and environment = "...")
           PROJECT=$(grep -E '^\s*project\s*=' "$TFVARS" | head -n1 | awk -F\" '{print $2}')
           ENVIRONMENT=$(grep -E '^\s*environment\s*=' "$TFVARS" | head -n1 | awk -F\" '{print $2}')
 
@@ -67,19 +57,14 @@ jobs:
           REGISTRY="${{ steps.ecr_login.outputs.registry }}"
           IMAGE_URI="${REGISTRY}/${REPO_NAME}"
 
-          echo "PROJECT=$PROJECT" >> $GITHUB_ENV
-          echo "ENVIRONMENT=$ENVIRONMENT" >> $GITHUB_ENV
           echo "REPO_NAME=$REPO_NAME" >> $GITHUB_ENV
           echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
 
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
 
-          echo "Computed:"
-          echo "  NAME_PREFIX = $NAME_PREFIX"
-          echo "  REPO_NAME    = $REPO_NAME"
-          echo "  IMAGE_URI    = $IMAGE_URI"
+          echo "IMAGE_URI=$IMAGE_URI"
+          echo "TAG=${GITHUB_SHA}"
 
-      # 4) Ensure the ECR repo exists (Terraform should have created it)
       - name: Verify ECR repository exists
         shell: bash
         run: |
@@ -87,14 +72,14 @@ jobs:
           aws ecr describe-repositories --repository-names "${REPO_NAME}" >/dev/null
           echo "ECR repo exists: ${REPO_NAME}"
 
-      # 5) Build + Push to ECR
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push image to ECR
+      # ✅ Push ONLY immutable tag (commit SHA)
+      - name: Build and push image to ECR (immutable tag)
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -104,10 +89,8 @@ jobs:
           pull: true
           no-cache: true
           tags: |
-            ${{ env.IMAGE_URI }}:latest
             ${{ env.IMAGE_URI }}:${{ github.sha }}
 
-      # 6) Scan the pushed image (by digest)
       - name: Trivy scan (scan pushed image by digest)
         uses: aquasecurity/trivy-action@0.24.0
         with:
@@ -117,11 +100,10 @@ jobs:
           exit-code: "1"
           ignore-unfixed: false
           vuln-type: "os,library"
-          severity: "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
+          severity: "HIGH,CRITICAL"
           scanners: "vuln"
 
-      - name: Print final image tags
+      - name: Print final image reference
         run: |
-          echo "Pushed to ECR:"
-          echo "  ${{ env.IMAGE_URI }}:latest"
+          echo "Pushed immutable image:"
           echo "  ${{ env.IMAGE_URI }}:${{ github.sha }}"
