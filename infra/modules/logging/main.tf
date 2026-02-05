@@ -65,7 +65,6 @@ resource "aws_s3_bucket_versioning" "alb_logs" {
   }
 }
 
-# ✅ CKV_AWS_300: abort incomplete multipart uploads
 resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
 
@@ -73,6 +72,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
     id     = "expire-alb-logs"
     status = "Enabled"
 
+    # CKV_AWS_300: abort incomplete multipart uploads
     abort_incomplete_multipart_upload {
       days_after_initiation = 7
     }
@@ -128,7 +128,6 @@ resource "aws_s3_bucket_versioning" "alb_logs_access" {
   }
 }
 
-# ✅ CKV_AWS_300: abort incomplete multipart uploads
 resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
   bucket = aws_s3_bucket.alb_logs_access.id
 
@@ -136,6 +135,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
     id     = "expire-access-logs"
     status = "Enabled"
 
+    # CKV_AWS_300: abort incomplete multipart uploads
     abort_incomplete_multipart_upload {
       days_after_initiation = 7
     }
@@ -212,19 +212,67 @@ resource "aws_s3_bucket_policy" "alb_logs" {
 }
 
 # ------------------------------------------------------------
-# SQS queue for S3 event notifications
-# ✅ FIX: Use AWS-managed key for SQS encryption (stable validation)
+# KMS CMK for SQS encryption (required by CKV2_AWS_73)
+# ✅ Slightly more permissive for stability of S3->SQS destination validation
+# ------------------------------------------------------------
+resource "aws_kms_key" "sqs_sse" {
+  description             = "CMK for SQS encryption (${var.name_prefix})"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "EnableRootPermissions"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      },
+      {
+        Sid       = "AllowSQSUseOfTheKey"
+        Effect    = "Allow"
+        Principal = { Service = "sqs.amazonaws.com" }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey",
+          "kms:CreateGrant",
+          "kms:ListGrants",
+          "kms:RevokeGrant"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-sqs-cmk"
+  })
+}
+
+resource "aws_kms_alias" "sqs_sse" {
+  name          = "alias/${var.name_prefix}-sqs-cmk"
+  target_key_id = aws_kms_key.sqs_sse.key_id
+}
+
+# ------------------------------------------------------------
+# SQS queue for S3 event notifications (encrypted with CMK)
 # ------------------------------------------------------------
 resource "aws_sqs_queue" "alb_logs_events" {
   name              = "${var.name_prefix}-alb-logs-events"
-  kms_master_key_id = "alias/aws/sqs"
+  kms_master_key_id = aws_kms_key.sqs_sse.arn
 
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-alb-logs-events"
   })
 }
 
-# ✅ SQS queue policy to allow S3 to send messages (required for validation)
+# SQS queue policy: allow S3 to send messages from both buckets
 data "aws_iam_policy_document" "alb_logs_events_queue_policy" {
   statement {
     sid    = "AllowS3SendMessageFromAlbLogsBucket"
@@ -284,7 +332,7 @@ resource "aws_sqs_queue_policy" "alb_logs_events" {
 
 # ------------------------------------------------------------
 # S3 bucket notifications -> SQS
-# ✅ Strong ordering: queue + policy MUST exist before notification validate
+# ✅ Depend on KMS alias + queue + queue policy
 # ------------------------------------------------------------
 resource "aws_s3_bucket_notification" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
@@ -296,6 +344,7 @@ resource "aws_s3_bucket_notification" "alb_logs" {
   }
 
   depends_on = [
+    aws_kms_alias.sqs_sse,
     aws_sqs_queue.alb_logs_events,
     aws_sqs_queue_policy.alb_logs_events
   ]
@@ -310,6 +359,7 @@ resource "aws_s3_bucket_notification" "alb_logs_access" {
   }
 
   depends_on = [
+    aws_kms_alias.sqs_sse,
     aws_sqs_queue.alb_logs_events,
     aws_sqs_queue_policy.alb_logs_events
   ]
