@@ -1,4 +1,5 @@
 data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
 
 resource "aws_kms_key" "ecr" {
   description             = "CMK for ECR (${var.name_prefix})"
@@ -14,6 +15,49 @@ resource "aws_kms_key" "ecr" {
         Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
         Action    = "kms:*"
         Resource  = "*"
+      },
+      {
+        Sid       = "AllowGitHubTerraformRoleUseKey"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/GitHubActions-Terraform-DevSecOps-Role" }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey",
+          "kms:GetKeyPolicy",
+          "kms:PutKeyPolicy",
+          "kms:CreateGrant",
+          "kms:ListGrants",
+          "kms:RevokeGrant",
+          "kms:TagResource",
+          "kms:UntagResource"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid       = "AllowECRUseOfKey"
+        Effect    = "Allow"
+        Principal = { Service = "ecr.amazonaws.com" }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey",
+          "kms:CreateGrant"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "kms:ViaService"    = "ecr.${data.aws_region.current.name}.amazonaws.com"
+            "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
+          }
+          Bool = {
+            "kms:GrantIsForAWSResource" = "true"
+          }
+        }
       }
     ]
   })
