@@ -8,5 +8,10 @@ terraform {
       # (e.g., providers = { aws = aws, aws.replica = aws.replica })
       configuration_aliases = [aws.replica]
     }
+
+    time = {
+      source  = "hashicorp/time"
+      version = ">= 0.10"
+    }
   }
 }

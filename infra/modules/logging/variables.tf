@@ -16,6 +16,12 @@ variable "alb_log_prefix" {
   default     = "alb-access"
 }
 
+variable "alb_log_retention_days" {
+  description = "Retention (days) for ALB log objects in S3"
+  type        = number
+  default     = 365
+}
+
 # Lifecycle tuning for S3 buckets
 variable "lifecycle_expire_days" {
   description = "Number of days to expire objects in log buckets"
