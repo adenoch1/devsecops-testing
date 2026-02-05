@@ -237,23 +237,26 @@ resource "aws_kms_key" "sqs_sse" {
   deletion_window_in_days = 7
   enable_key_rotation     = true
 
-  # NOTE:
-  # S3 validates SQS destinations; with SSE-KMS CMK the queue must be usable immediately.
-  # This policy allows SQS to use and create grants via the regional SQS service.
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
+
       {
-        Sid       = "EnableRootPermissions"
-        Effect    = "Allow"
-        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
-        Action    = "kms:*"
-        Resource  = "*"
+        Sid    = "EnableRootPermissions"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        }
+        Action   = "kms:*"
+        Resource = "*"
       },
+
       {
-        Sid       = "AllowSQSUseOfTheKey"
-        Effect    = "Allow"
-        Principal = { Service = "sqs.amazonaws.com" }
+        Sid    = "AllowSQSUseOfTheKey"
+        Effect = "Allow"
+        Principal = {
+          Service = "sqs.amazonaws.com"
+        }
         Action = [
           "kms:Encrypt",
           "kms:Decrypt",
@@ -268,19 +271,41 @@ resource "aws_kms_key" "sqs_sse" {
         Resource = "*"
         Condition = {
           StringEquals = {
-            "kms:ViaService"    = "sqs.${data.aws_region.current.id}.amazonaws.com",
-            "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
+            "kms:ViaService"    = "sqs.${data.aws_region.current.name}.amazonaws.com"
+            "kms:CallerAccount" = data.aws_caller_identity.current.account_id
           }
           Bool = {
             "kms:GrantIsForAWSResource" = "true"
+          }
+        }
+      },
+
+      # ✅ REQUIRED FIX — THIS WAS MISSING
+      {
+        Sid    = "AllowS3ToUseKeyViaSQS"
+        Effect = "Allow"
+        Principal = {
+          Service = "s3.amazonaws.com"
+        }
+        Action = [
+          "kms:GenerateDataKey",
+          "kms:Decrypt"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "kms:ViaService" = "sqs.${data.aws_region.current.name}.amazonaws.com"
           }
         }
       }
     ]
   })
 
-  tags = merge(var.tags, { Name = "${var.name_prefix}-sqs-cmk" })
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-sqs-cmk"
+  })
 }
+
 
 resource "aws_kms_alias" "sqs_sse" {
   name          = "alias/${var.name_prefix}-sqs-cmk"
