@@ -401,9 +401,9 @@ resource "aws_s3_bucket_notification" "alb_logs_access" {
   depends_on = [time_sleep.wait_for_sqs_policy]
 }
 
-# ------------------------------------------------------------
+# -----------------------------------------------------------
 # KMS key for CloudWatch Log Groups
-# ------------------------------------------------------------
+# -----------------------------------------------------------
 resource "aws_kms_key" "cloudwatch_logs" {
   description             = "KMS key for CloudWatch Logs (${var.name_prefix})"
   deletion_window_in_days = 7
