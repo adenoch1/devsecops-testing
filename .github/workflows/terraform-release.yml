@@ -102,7 +102,7 @@ jobs:
             echo "Waiting for DNS/HTTPS... attempt $i/30"
             sleep 20
           done
-          echo "❌ HTTPS test failed after retries"
+          echo "❌ HTTPS test failed after retries."
           exit 1
 
   destroy_demo:
