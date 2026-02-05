@@ -1,17 +1,27 @@
-name: Release (Build + Push to ECR)
+name: 03-release (Build + Push to ECR)
 
 on:
   push:
     branches: ["main"]
+    paths:
+      - "app/**"
+      - "docker/**"
+      - ".github/workflows/03-release.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
   id-token: write
+  actions: write
+
+concurrency:
+  group: 03-release-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   DOCKERFILE_PATH: docker/Dockerfile
   BUILD_CONTEXT: .
+  TFVARS_PATH: infra/envs/dev/terraform.tfvars
 
 jobs:
   build_push_ecr:
@@ -19,10 +29,15 @@ jobs:
     runs-on: ubuntu-latest
     environment: dev
 
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+      image_uri: ${{ steps.meta.outputs.image_uri }}
+
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
+      # OIDC auth to AWS (NO static keys)
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -36,13 +51,13 @@ jobs:
         id: ecr_login
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Compute ECR image URI
-        id: image
+      - name: Compute ECR image URI + tag (immutable)
+        id: meta
         shell: bash
         run: |
           set -euo pipefail
 
-          TFVARS="infra/envs/dev/terraform.tfvars"
+          TFVARS="${{ env.TFVARS_PATH }}"
           PROJECT=$(grep -E '^\s*project\s*=' "$TFVARS" | head -n1 | awk -F\" '{print $2}')
           ENVIRONMENT=$(grep -E '^\s*environment\s*=' "$TFVARS" | head -n1 | awk -F\" '{print $2}')
 
@@ -56,16 +71,18 @@ jobs:
 
           REGISTRY="${{ steps.ecr_login.outputs.registry }}"
           IMAGE_URI="${REGISTRY}/${REPO_NAME}"
+          TAG="${GITHUB_SHA}"
 
           echo "REPO_NAME=$REPO_NAME" >> $GITHUB_ENV
           echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
 
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
 
           echo "IMAGE_URI=$IMAGE_URI"
-          echo "TAG=${GITHUB_SHA}"
+          echo "TAG=$TAG"
 
-      - name: Verify ECR repository exists
+      - name: Verify ECR repository exists (created by Terraform)
         shell: bash
         run: |
           set -euo pipefail
@@ -78,7 +95,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ✅ Push ONLY immutable tag (commit SHA)
+      # Push ONLY immutable tag (SHA). No "latest" because your repo is immutable.
       - name: Build and push image to ECR (immutable tag)
         id: build
         uses: docker/build-push-action@v6
@@ -89,9 +106,11 @@ jobs:
           pull: true
           no-cache: true
           tags: |
-            ${{ env.IMAGE_URI }}:${{ github.sha }}
+            ${{ env.IMAGE_URI }}:${{ steps.meta.outputs.tag }}
 
-      - name: Trivy scan (scan pushed image by digest)
+      # Trivy scan the pushed image by digest
+      # Production gate: fail only on HIGH/CRITICAL
+      - name: Trivy scan (HIGH/CRITICAL gate)
         uses: aquasecurity/trivy-action@0.24.0
         with:
           scan-type: image
@@ -105,5 +124,25 @@ jobs:
 
       - name: Print final image reference
         run: |
-          echo "Pushed immutable image:"
-          echo "  ${{ env.IMAGE_URI }}:${{ github.sha }}"
+          echo "Pushed image:"
+          echo "  ${{ env.IMAGE_URI }}:${{ steps.meta.outputs.tag }}"
+
+  trigger_terraform_release:
+    name: Trigger terraform-release (deploy)
+    needs: build_push_ecr
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Trigger terraform-release via repository_dispatch
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          event-type: terraform-deploy
+          client-payload: |
+            {
+              "action": "deploy",
+              "image_tag": "${{ needs.build_push_ecr.outputs.image_tag }}",
+              "smoke_path": "/health",
+              "teardown_after_test": "false",
+              "two_step_apply": "true"
+            }
