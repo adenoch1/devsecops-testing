@@ -51,7 +51,7 @@ resource "aws_kms_key" "ecr" {
         Resource = "*"
         Condition = {
           StringEquals = {
-            "kms:ViaService"    = "ecr.${data.aws_region.current.name}.amazonaws.com"
+            "kms:ViaService"    = "ecr.${data.aws_region.current.id}.amazonaws.com"
             "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
           }
           Bool = {

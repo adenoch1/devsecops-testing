@@ -73,7 +73,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
     status = "Enabled"
 
     expiration {
-      days = var.alb_log_retention_days
+      days = var.flow_log_retention_days
     }
   }
 }
@@ -131,7 +131,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
     status = "Enabled"
 
     expiration {
-      days = var.alb_log_retention_days
+      days = var.flow_log_retention_days
     }
   }
 }
@@ -203,7 +203,6 @@ resource "aws_s3_bucket_policy" "alb_logs" {
 
 # ------------------------------------------------------------
 # KMS key for SQS encryption (used by S3 event notifications)
-# ✅ FIX: add grants + ViaService + CallerAccount so S3->SQS validation succeeds
 # ------------------------------------------------------------
 resource "aws_kms_key" "sqs_sse" {
   description             = "CMK for SQS encryption (${var.name_prefix})"
@@ -254,9 +253,6 @@ resource "aws_kms_alias" "sqs_sse" {
   target_key_id = aws_kms_key.sqs_sse.key_id
 }
 
-# ------------------------------------------------------------
-# CKV2_AWS_62: S3 event notifications enabled (SQS)
-# ------------------------------------------------------------
 resource "aws_sqs_queue" "alb_logs_events" {
   name              = "${var.name_prefix}-alb-logs-events"
   kms_master_key_id = aws_kms_key.sqs_sse.arn
@@ -266,7 +262,6 @@ resource "aws_sqs_queue" "alb_logs_events" {
   })
 }
 
-# ✅ FIX: add SourceAccount + SourceArn (best practice and fixes validation)
 data "aws_iam_policy_document" "alb_logs_events_queue_policy" {
   statement {
     sid    = "AllowS3SendMessageFromAlbLogsBucket"
@@ -324,7 +319,6 @@ resource "aws_sqs_queue_policy" "alb_logs_events" {
   policy    = data.aws_iam_policy_document.alb_logs_events_queue_policy.json
 }
 
-# ✅ FIX: keep depends_on so SQS policy exists BEFORE notifications validate
 resource "aws_s3_bucket_notification" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
 
