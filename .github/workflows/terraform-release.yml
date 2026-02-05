@@ -1,93 +1,263 @@
-name: Terraform Release
+name: terraform-release
 
 on:
+  push:
+    branches: ["main"]
+    paths:
+      - "infra/**/*.tf"
+      - "infra/**/terraform.tfvars"
+      - ".github/workflows/terraform-release.yml"
+
   workflow_dispatch:
     inputs:
       action:
-        description: "deploy or destroy"
+        description: "Choose what to run"
         required: true
-        default: deploy
-      teardown_after_test:
-        description: "Destroy infra after DNS test"
+        default: "deploy"
+        type: choice
+        options:
+          - deploy
+          - destroy
+      two_step_apply:
+        description: "Use two-step apply (prime S3->SQS prereqs, then full apply)"
         required: true
         default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      teardown_after_test:
+        description: "Destroy infra after DNS smoke test (recommended for testing)"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      smoke_path:
+        description: "HTTP path to test on the ALB (example: /health or /)"
+        required: true
+        default: "/"
+        type: string
 
 permissions:
   id-token: write
   contents: read
 
-env:
-  TF_VERSION: 1.6.6
+concurrency:
+  group: terraform-release-${{ github.ref }}
+  cancel-in-progress: false
 
-########################################
-# DEV – Infrastructure Creation
-########################################
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VERSION: "1.6.6"
+  WORKDIR: "infra/envs/dev"
 
 jobs:
-  dev:
-    if: inputs.action == 'deploy'
-    environment: dev
+  ############################################################
+  # DEV (Deploy / Apply)
+  ############################################################
+  deploy:
+    name: Deploy (dev)
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.action == 'deploy') }}
     runs-on: ubuntu-latest
+    environment: dev
+
+    defaults:
+      run:
+        working-directory: ${{ env.WORKDIR }}
+
+    outputs:
+      alb_dns_name: ${{ steps.tf_outputs.outputs.alb_dns_name }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: hashicorp/setup-terraform@v3
+      # OIDC Auth (from GitHub Environment secrets)
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Hard verification: if this fails, your role ARN/region/trust policy is wrong
+      - name: Verify AWS identity (STS)
+        run: aws sts get-caller-identity
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Terraform Init
-        run: terraform init
-        working-directory: infra/envs/dev
+      - name: Terraform init
+        run: terraform init -input=false
 
-      - name: Terraform Plan
+      # Decide two-step strategy:
+      # - Push to main: default false (fast path)
+      # - Manual run: obey input two_step_apply
+      - name: Determine apply strategy
+        id: strategy
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "two_step=${{ inputs.two_step_apply }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "two_step=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Fast path plan/apply
+      - name: Terraform plan (full)
+        id: plan_full
         run: terraform plan -out=tfplan.binary
-        working-directory: infra/envs/dev
 
-      - name: Terraform Apply (Step 1)
+      - name: Terraform apply (full - fast path)
+        id: apply_full
+        continue-on-error: true
         run: terraform apply -auto-approve tfplan.binary
-        working-directory: infra/envs/dev
 
-########################################
-# DNS – Smoke Test (ALB DNS)
-########################################
+      # If fast apply failed, detect known S3 destination validation error
+      - name: Detect S3 destination validation error
+        id: detect_s3_validation
+        if: ${{ steps.apply_full.outcome == 'failure' }}
+        run: |
+          set -euo pipefail
+          terraform apply -auto-approve tfplan.binary 2>tf_err.log || true
 
+          if grep -q "Unable to validate the following destination configurations" tf_err.log; then
+            echo "hit_validation=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "hit_validation=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Two-step apply (manual requested OR fast-path hit the known validation issue)
+      - name: Terraform apply (step 1 - prime S3->SQS prereqs)
+        if: |
+          (github.event_name == 'workflow_dispatch' && steps.strategy.outputs.two_step == 'true') ||
+          (steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true')
+        run: |
+          set -euo pipefail
+
+          terraform apply -auto-approve \
+            -target=module.logging.aws_kms_key.sqs_sse \
+            -target=module.logging.aws_kms_alias.sqs_sse \
+            -target=module.logging.aws_sqs_queue.alb_logs_events \
+            -target=module.logging.aws_sqs_queue_policy.alb_logs_events \
+            -target=module.logging.aws_s3_bucket.alb_logs \
+            -target=module.logging.aws_s3_bucket.alb_logs_access \
+            -target=module.logging.aws_s3_bucket_policy.alb_logs \
+            -target=module.logging.aws_s3_bucket_public_access_block.alb_logs \
+            -target=module.logging.aws_s3_bucket_public_access_block.alb_logs_access \
+            -target=module.logging.aws_s3_bucket_server_side_encryption_configuration.alb_logs \
+            -target=module.logging.aws_s3_bucket_server_side_encryption_configuration.alb_logs_access \
+            -target=module.logging.aws_s3_bucket_versioning.alb_logs \
+            -target=module.logging.aws_s3_bucket_versioning.alb_logs_access
+
+      - name: Wait for AWS propagation (SQS policy / KMS grants)
+        if: |
+          (github.event_name == 'workflow_dispatch' && steps.strategy.outputs.two_step == 'true') ||
+          (steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true')
+        run: |
+          echo "Waiting for AWS propagation..."
+          sleep 120
+
+      - name: Terraform plan (full - after prime)
+        if: |
+          (github.event_name == 'workflow_dispatch' && steps.strategy.outputs.two_step == 'true') ||
+          (steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true')
+        run: terraform plan -out=tfplan2.binary
+
+      - name: Terraform apply (full - after prime)
+        if: |
+          (github.event_name == 'workflow_dispatch' && steps.strategy.outputs.two_step == 'true') ||
+          (steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true')
+        run: terraform apply -auto-approve tfplan2.binary
+
+      # If fast path failed and it was NOT the known S3 validation issue, fail hard
+      - name: Fail if apply failed for unknown reason
+        if: ${{ steps.apply_full.outcome == 'failure' && (steps.detect_s3_validation.outputs.hit_validation != 'true') }}
+        run: |
+          echo "Terraform apply failed and it was NOT the known S3 destination validation issue."
+          exit 1
+
+      - name: Get Terraform outputs
+        id: tf_outputs
+        run: |
+          echo "alb_dns_name=$(terraform output -raw alb_dns_name)" >> "$GITHUB_OUTPUT"
+
+      - name: Show ALB DNS name
+        run: |
+          echo "ALB DNS NAME:"
+          echo "${{ steps.tf_outputs.outputs.alb_dns_name }}"
+
+  ############################################################
+  # DNS (Smoke Test) - environment gate
+  ############################################################
   dns:
-    needs: dev
-    environment: dns
+    name: DNS Smoke Test
+    needs: deploy
+    if: ${{ needs.deploy.result == 'success' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.action == 'deploy')) }}
     runs-on: ubuntu-latest
+    environment: dns
 
     steps:
+      - name: Show ALB DNS
+        run: |
+          echo "ALB DNS: ${{ needs.deploy.outputs.alb_dns_name }}"
+
       - name: Wait for ALB propagation
         run: sleep 60
 
-      - name: Smoke Test ALB
+      - name: Smoke test over HTTP (ALB)
         run: |
-          echo "Test using ALB DNS:"
-          echo "http://<your-alb-dns-name>"
-          echo "Expect HTTP 200 or redirect to HTTPS"
+          set -euo pipefail
+          URL="http://${{ needs.deploy.outputs.alb_dns_name }}${{ github.event_name == 'workflow_dispatch' && inputs.smoke_path || '/' }}"
+          echo "Testing: $URL"
+          # We accept 200/301/302 because many stacks redirect HTTP->HTTPS
+          code=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || true)
+          echo "HTTP status: $code"
+          if [ "$code" != "200" ] && [ "$code" != "301" ] && [ "$code" != "302" ]; then
+            echo "Smoke test failed (expected 200/301/302)."
+            exit 1
+          fi
+          echo "Smoke test passed."
 
-########################################
-# DESTROY – Automatic Cleanup
-########################################
-
+  ############################################################
+  # DESTROY (cleanup) - environment gate
+  ############################################################
   destroy:
-    if: inputs.teardown_after_test == 'true'
+    name: Destroy (dev)
     needs: dns
-    environment: destroy
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.action == 'destroy' || inputs.teardown_after_test == 'true') }}
     runs-on: ubuntu-latest
+    environment: destroy
+
+    defaults:
+      run:
+        working-directory: ${{ env.WORKDIR }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: hashicorp/setup-terraform@v3
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Verify AWS identity (STS)
+        run: aws sts get-caller-identity
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Terraform Init
-        run: terraform init
-        working-directory: infra/envs/dev
+      - name: Terraform init
+        run: terraform init -input=false
 
-      - name: Terraform Destroy
+      - name: Terraform destroy
         run: terraform destroy -auto-approve
-        working-directory: infra/envs/dev
