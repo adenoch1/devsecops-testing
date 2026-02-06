@@ -38,6 +38,9 @@ env:
   WORKDIR: "infra/envs/dev"
 
 jobs:
+  ########################################################
+  # DEV — Gate 1
+  ########################################################
   deploy:
     name: Deploy (dev)
     if: ${{ inputs.action == 'deploy' }}
@@ -93,56 +96,37 @@ jobs:
       - name: Terraform apply
         run: terraform apply -auto-approve tfplan.binary
 
-      - name: Capture ALB DNS + validate (must not be empty)
-  id: capture
-  shell: bash
-  run: |
-    set -euo pipefail
-
-    echo "smoke_path=${{ inputs.smoke_path }}" >> "$GITHUB_OUTPUT"
-
-    echo "Terraform outputs (raw):"
-    terraform output || true
-
-    # Fallback scan for elb hostname from outputs (works even if output key differs)
-    ALB="$(terraform output 2>/dev/null | grep -Eo '[a-zA-Z0-9-]+\.([a-z0-9-]+\.)?elb\.amazonaws\.com' | head -n1 || true)"
-
-    # If still empty, try common output keys explicitly
-    if [ -z "$ALB" ]; then
-      for key in alb_dns_name load_balancer_dns_name lb_dns_name dns_name; do
-        if terraform output -raw "$key" >/dev/null 2>&1; then
-          v="$(terraform output -raw "$key" | tr -d '\r\n\t ')"
-          if [ -n "$v" ] && echo "$v" | grep -q "elb.amazonaws.com"; then
-            ALB="$v"
-            echo "Found ALB output key: $key"
-            break
-          fi
-        fi
-      done
-    fi
-
-    echo "Resolved ALB DNS: '$ALB'"
-
-    if [ -z "$ALB" ]; then
-      echo "ERROR: Could not find an ALB DNS name in terraform outputs."
-      echo "This means your Terraform module is not exporting the ALB DNS as an output, OR apply did not create the ALB."
-      echo "Fix: Add an output in infra modules for ALB DNS, or paste `terraform output` names here."
-      exit 1
-    fi
-
-    echo "alb_dns_name=$ALB" >> "$GITHUB_OUTPUT"
-    echo "Wrote alb_dns_name to GITHUB_OUTPUT."
-
-
-      - name: Show URLs
+      - name: Capture ALB DNS (authoritative)
+        id: capture
         shell: bash
         run: |
           set -euo pipefail
+
+          echo "smoke_path=${{ inputs.smoke_path }}" >> "$GITHUB_OUTPUT"
+
+          echo "Terraform outputs:"
+          terraform output
+
+          ALB="$(terraform output -raw alb_dns_name | tr -d '\r\n\t ')"
+          if [ -z "$ALB" ]; then
+            echo "ERROR: terraform output -raw alb_dns_name returned empty."
+            exit 1
+          fi
+
+          echo "Captured ALB: $ALB"
+          echo "alb_dns_name=$ALB" >> "$GITHUB_OUTPUT"
+
+      - name: Show what will be tested
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ALB DNS (job output): ${{ steps.capture.outputs.alb_dns_name }}"
           echo "HTTPS: https://${{ steps.capture.outputs.alb_dns_name }}${{ inputs.smoke_path }}"
           echo "HTTP : http://${{ steps.capture.outputs.alb_dns_name }}${{ inputs.smoke_path }}"
-          echo "ECR repo (if present):"
-          terraform output -raw ecr_repository_url || true
 
+  ########################################################
+  # DNS — Gate 2
+  ########################################################
   dns:
     name: DNS Smoke Test (dns)
     needs: deploy
@@ -192,6 +176,9 @@ jobs:
           echo "Smoke test failed (expected 200/301/302)."
           exit 1
 
+  ########################################################
+  # DESTROY — Gate 3
+  ########################################################
   destroy:
     name: Destroy (destroy)
     if: ${{ inputs.action == 'destroy' }}
