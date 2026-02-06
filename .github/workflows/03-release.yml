@@ -101,7 +101,7 @@ jobs:
           if aws ecr describe-repositories --repository-names "${REPO_NAME}" >/dev/null 2>&1; then
             echo "ECR repo exists: ${REPO_NAME}"
           else
-            echo "ERROR: ECR repo ${REPO_NAME} does not exist"
+            echo "ERROR: ECR repo ${REPO_NAME} does not exist."
             echo "Action: run terraform-release (deploy) once to create ECR repo, then re-run 03-release."
             exit 1
           fi
