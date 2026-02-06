@@ -11,7 +11,7 @@ on:
         options: [deploy, destroy]
 
       container_image_tag:
-        description: "Container tag to deploy (git SHA/run-...). Leave empty to use the commit SHA."
+        description: "Container tag to deploy (run-... or sha-...). Leave empty to use the commit SHA."
         required: false
         default: ""
 
@@ -146,41 +146,137 @@ jobs:
         run: terraform apply -auto-approve tfplan2.binary
 
       - name: Fail if apply failed for unknown reason
-        if: ${{ steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation != 'true' }}
+        if: ${{ steps.apply_full.outcome == 'failure' && (steps.detect_s3_validation.outputs.hit_validation != 'true') }}
         run: |
           echo "Terraform apply failed and it was NOT the known S3 destination validation issue."
           exit 1
 
-      # ✅ NEW: capture + validate outputs (no empty strings)
-      - name: Capture and validate Terraform outputs
+      # ✅ Robust output capture (auto-detect key)
+      - name: Capture and validate Terraform outputs (auto-detect ALB DNS)
         id: capture
         shell: bash
         run: |
           set -euo pipefail
 
-          # Always output smoke_path for dns job
           echo "smoke_path=${{ inputs.smoke_path }}" >> "$GITHUB_OUTPUT"
 
-          # Confirm output exists
-          if ! terraform output -raw alb_dns_name >/dev/null 2>&1; then
-            echo "ERROR: Terraform output 'alb_dns_name' is missing."
-            echo "Run: terraform output (locally) to see available outputs."
+          # Dump outputs as JSON
+          OUT_JSON="$(terraform output -json || true)"
+          if [ -z "$OUT_JSON" ] || [ "$OUT_JSON" = "null" ]; then
+            echo "ERROR: terraform output -json returned empty."
             exit 1
           fi
 
-          ALB="$(terraform output -raw alb_dns_name | tr -d '\r\n\t ')"
-          if [ -z "$ALB" ]; then
-            echo "ERROR: alb_dns_name output is empty."
-            exit 1
-          fi
+          # Try common output keys (in order)
+          python - <<'PY'
+import json, os, sys
+data = json.loads(os.environ["OUT_JSON"])
+candidates = [
+  "alb_dns_name",
+  "alb_dns",
+  "alb_fqdn",
+  "alb_hostname",
+  "load_balancer_dns_name",
+  "lb_dns_name",
+  "dns_name",
+]
+def get_value(key):
+  v = data.get(key)
+  if not v: return None
+  # terraform output -json format: { "value": ... }
+  if isinstance(v, dict) and "value" in v:
+    return v["value"]
+  return v
 
-          echo "alb_dns_name=$ALB" >> "$GITHUB_OUTPUT"
-          echo "ALB DNS = $ALB"
+alb = None
+picked = None
+for k in candidates:
+  val = get_value(k)
+  if isinstance(val, str) and val.strip():
+    alb = val.strip()
+    picked = k
+    break
+
+if not alb:
+  print("ERROR: Could not find an ALB DNS output key.")
+  print("Available outputs:", ", ".join(sorted(data.keys())))
+  sys.exit(1)
+
+print(f"Found ALB output key: {picked}")
+print(f"ALB DNS: {alb}")
+# Write to GITHUB_OUTPUT
+with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+  f.write(f"alb_dns_name={alb}\n")
+PY
+        env:
+          OUT_JSON: ${{ steps.capture.outputs.OUT_JSON || '' }}
+          # pass JSON via env (bash sets it just above)
+          OUT_JSON: ${{ '' }}
+        # NOTE: github doesn't support dynamic env from previous line; use bash export instead
+      - name: Export outputs JSON for python (helper)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "OUT_JSON<<EOF" >> $GITHUB_ENV
+          terraform output -json >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Capture ALB DNS from outputs JSON (final)
+        id: capture2
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "smoke_path=${{ inputs.smoke_path }}" >> "$GITHUB_OUTPUT"
+
+          python - <<'PY'
+import json, os, sys
+data = json.loads(os.environ["OUT_JSON"])
+candidates = [
+  "alb_dns_name",
+  "alb_dns",
+  "alb_fqdn",
+  "alb_hostname",
+  "load_balancer_dns_name",
+  "lb_dns_name",
+  "dns_name",
+]
+def get_value(key):
+  v = data.get(key)
+  if not v: return None
+  if isinstance(v, dict) and "value" in v:
+    return v["value"]
+  return v
+
+alb = None
+picked = None
+for k in candidates:
+  val = get_value(k)
+  if isinstance(val, str) and val.strip():
+    alb = val.strip()
+    picked = k
+    break
+
+if not alb:
+  print("ERROR: Could not find an ALB DNS output key.")
+  print("Available outputs:", ", ".join(sorted(data.keys())))
+  sys.exit(1)
+
+print(f"Found ALB output key: {picked}")
+print(f"ALB DNS: {alb}")
+
+with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+  f.write(f"alb_dns_name={alb}\n")
+PY
 
       - name: Show ALB URL
         run: |
-          echo "ALB DNS: ${{ steps.capture.outputs.alb_dns_name }}"
-          echo "Try: https://${{ steps.capture.outputs.alb_dns_name }}${{ inputs.smoke_path }}"
+          echo "ALB DNS: ${{ steps.capture2.outputs.alb_dns_name }}"
+          echo "Try: https://${{ steps.capture2.outputs.alb_dns_name }}${{ inputs.smoke_path }}"
+
+    outputs:
+      alb_dns_name: ${{ steps.capture2.outputs.alb_dns_name }}
+      smoke_path: ${{ inputs.smoke_path }}
 
   ############################################################
   # DNS — Gate 2
@@ -196,11 +292,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo "ALB from deploy outputs: '${{ needs.deploy.outputs.alb_dns_name }}'"
           if [ -z "${{ needs.deploy.outputs.alb_dns_name }}" ]; then
-            echo "ERROR: ALB DNS output is empty from deploy job."
+            echo "ERROR: ALB DNS output is empty. Deploy job did not capture terraform outputs correctly."
             exit 1
           fi
-          echo "ALB DNS: ${{ needs.deploy.outputs.alb_dns_name }}"
 
       - name: Wait for ALB propagation
         run: sleep 60

@@ -122,7 +122,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ✅ Always push RUN_TAG; push SHA_TAG only if it doesn't exist.
+      # ✅ Always push RUN_TAG; push SHA_TAG only if it doesn't exist
       - name: Build and push image to ECR (immutable-safe)
         id: build
         uses: docker/build-push-action@v6
