@@ -11,7 +11,7 @@ on:
         options: [deploy, destroy]
 
       container_image_tag:
-        description: "Container tag to deploy (git SHA). Leave empty to use the commit SHA."
+        description: "Container tag to deploy (git SHA/run-...). Leave empty to use the commit SHA."
         required: false
         default: ""
 
@@ -43,9 +43,9 @@ env:
   WORKDIR: "infra/envs/dev"
 
 jobs:
-  ###########################################################
+  ############################################################
   # DEV (Deploy / Apply) — Gate 1
-  ###########################################################
+  ############################################################
   deploy:
     name: Deploy (dev)
     if: ${{ inputs.action == 'deploy' }}
@@ -57,14 +57,13 @@ jobs:
         working-directory: ${{ env.WORKDIR }}
 
     outputs:
-      alb_dns_name: ${{ steps.tf_outputs.outputs.alb_dns_name }}
-      smoke_path: ${{ inputs.smoke_path }}
+      alb_dns_name: ${{ steps.capture.outputs.alb_dns_name }}
+      smoke_path: ${{ steps.capture.outputs.smoke_path }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Apply role should live in environment dev
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -82,19 +81,16 @@ jobs:
       - name: Terraform init
         run: terraform init -input=false
 
-      # ✅ NEW: resolve tag automatically if not provided
       - name: Resolve container image tag
         id: tag
         shell: bash
         run: |
           set -euo pipefail
-
           if [ -n "${{ inputs.container_image_tag }}" ]; then
             TAG="${{ inputs.container_image_tag }}"
           else
             TAG="${GITHUB_SHA}"
           fi
-
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Using container_image_tag=$TAG"
 
@@ -155,15 +151,36 @@ jobs:
           echo "Terraform apply failed and it was NOT the known S3 destination validation issue."
           exit 1
 
-      - name: Get Terraform outputs
-        id: tf_outputs
+      # ✅ NEW: capture + validate outputs (no empty strings)
+      - name: Capture and validate Terraform outputs
+        id: capture
+        shell: bash
         run: |
-          echo "alb_dns_name=$(terraform output -raw alb_dns_name)" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+
+          # Always output smoke_path for dns job
+          echo "smoke_path=${{ inputs.smoke_path }}" >> "$GITHUB_OUTPUT"
+
+          # Confirm output exists
+          if ! terraform output -raw alb_dns_name >/dev/null 2>&1; then
+            echo "ERROR: Terraform output 'alb_dns_name' is missing."
+            echo "Run: terraform output (locally) to see available outputs."
+            exit 1
+          fi
+
+          ALB="$(terraform output -raw alb_dns_name | tr -d '\r\n\t ')"
+          if [ -z "$ALB" ]; then
+            echo "ERROR: alb_dns_name output is empty."
+            exit 1
+          fi
+
+          echo "alb_dns_name=$ALB" >> "$GITHUB_OUTPUT"
+          echo "ALB DNS = $ALB"
 
       - name: Show ALB URL
         run: |
-          echo "ALB DNS: ${{ steps.tf_outputs.outputs.alb_dns_name }}"
-          echo "Try: https://${{ steps.tf_outputs.outputs.alb_dns_name }}${{ inputs.smoke_path }}"
+          echo "ALB DNS: ${{ steps.capture.outputs.alb_dns_name }}"
+          echo "Try: https://${{ steps.capture.outputs.alb_dns_name }}${{ inputs.smoke_path }}"
 
   ############################################################
   # DNS — Gate 2
@@ -175,6 +192,16 @@ jobs:
     environment: dns
 
     steps:
+      - name: Assert ALB DNS is present
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${{ needs.deploy.outputs.alb_dns_name }}" ]; then
+            echo "ERROR: ALB DNS output is empty from deploy job."
+            exit 1
+          fi
+          echo "ALB DNS: ${{ needs.deploy.outputs.alb_dns_name }}"
+
       - name: Wait for ALB propagation
         run: sleep 60
 
