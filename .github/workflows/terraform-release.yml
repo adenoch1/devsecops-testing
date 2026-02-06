@@ -94,27 +94,62 @@ jobs:
       - name: Terraform apply
         run: terraform apply -auto-approve tfplan.binary
 
-      - name: Capture ALB output + validate
+      # ✅ Capture ALB DNS robustly by finding the output that contains elb.amazonaws.com
+      - name: Capture outputs (ALB DNS) + validate
         id: capture
         shell: bash
         run: |
           set -euo pipefail
+
           echo "smoke_path=${{ inputs.smoke_path }}" >> "$GITHUB_OUTPUT"
 
           echo "Terraform outputs:"
           terraform output || true
 
-          # If your output is not alb_dns_name, change it here.
-          ALB="$(terraform output -raw alb_dns_name 2>/dev/null | tr -d '\r\n\t ')"
+          OUT_JSON="$(terraform output -json)"
 
-          if [ -z "$ALB" ]; then
-            echo "ERROR: Terraform output 'alb_dns_name' is missing or empty."
-            echo "Fix: run locally in infra/envs/dev -> terraform output"
-            exit 1
-          fi
+          python3 - <<'PY'
+import json, os, re, sys
+data = json.loads(os.environ["OUT_JSON"])
 
-          echo "alb_dns_name=$ALB" >> "$GITHUB_OUTPUT"
-          echo "ALB DNS: $ALB"
+def extract_value(v):
+  if isinstance(v, dict) and "value" in v:
+    return v["value"]
+  return v
+
+alb = None
+picked = None
+
+# Look for any output string containing elb.amazonaws.com
+for k, v in data.items():
+  val = extract_value(v)
+  if isinstance(val, str) and "elb.amazonaws.com" in val:
+    alb = val.strip()
+    picked = k
+    break
+
+if not alb:
+  print("ERROR: Could not find any Terraform output containing 'elb.amazonaws.com'.")
+  print("Available outputs:", ", ".join(sorted(data.keys())))
+  sys.exit(1)
+
+print(f"Found ALB output key: {picked}")
+print(f"ALB DNS: {alb}")
+
+with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+  f.write(f"alb_dns_name={alb}\n")
+PY
+        env:
+          OUT_JSON: ${{ '' }}
+
+      - name: Show ALB + ECR outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ALB DNS: ${{ steps.capture.outputs.alb_dns_name }}"
+          echo "Smoke path: ${{ inputs.smoke_path }}"
+          echo "ECR repo (Terraform output ecr_repository_url):"
+          terraform output -raw ecr_repository_url || true
 
   ########################################################
   # DNS — Gate 2
