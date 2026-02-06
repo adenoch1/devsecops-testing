@@ -8,7 +8,9 @@ on:
         required: true
         default: "deploy"
         type: choice
-        options: [deploy, destroy]
+        options:
+          - deploy
+          - destroy
 
       container_image_tag:
         description: "Container tag to deploy (run-... / sha-...). Leave empty to use commit SHA."
@@ -36,9 +38,6 @@ env:
   WORKDIR: "infra/envs/dev"
 
 jobs:
-  ########################################################
-  # DEV — Gate 1
-  ########################################################
   deploy:
     name: Deploy (dev)
     if: ${{ inputs.action == 'deploy' }}
@@ -94,8 +93,7 @@ jobs:
       - name: Terraform apply
         run: terraform apply -auto-approve tfplan.binary
 
-      # ✅ Capture ALB DNS robustly by finding the output that contains elb.amazonaws.com
-      - name: Capture outputs (ALB DNS) + validate
+      - name: Capture ALB DNS + validate
         id: capture
         shell: bash
         run: |
@@ -106,54 +104,42 @@ jobs:
           echo "Terraform outputs:"
           terraform output || true
 
-          OUT_JSON="$(terraform output -json)"
+          # Try common output keys first (fast)
+          ALB=""
+          for key in alb_dns_name load_balancer_dns_name lb_dns_name dns_name; do
+            if terraform output -raw "$key" >/dev/null 2>&1; then
+              v="$(terraform output -raw "$key" | tr -d '\r\n\t ')"
+              if [ -n "$v" ] && echo "$v" | grep -q "elb.amazonaws.com"; then
+                ALB="$v"
+                echo "Found ALB output key: $key"
+                break
+              fi
+            fi
+          done
 
-          python3 - <<'PY'
-import json, os, re, sys
-data = json.loads(os.environ["OUT_JSON"])
+          # Fallback: scan all outputs for an elb hostname
+          if [ -z "$ALB" ]; then
+            ALB="$(terraform output 2>/dev/null | grep -Eo '[a-zA-Z0-9-]+\.([a-z0-9-]+\.)?elb\.amazonaws\.com' | head -n1 || true)"
+          fi
 
-def extract_value(v):
-  if isinstance(v, dict) and "value" in v:
-    return v["value"]
-  return v
+          if [ -z "$ALB" ]; then
+            echo "ERROR: Could not find an ALB DNS name in terraform outputs."
+            echo "Run locally: cd infra/envs/dev ; terraform output"
+            exit 1
+          fi
 
-alb = None
-picked = None
+          echo "alb_dns_name=$ALB" >> "$GITHUB_OUTPUT"
+          echo "ALB DNS: $ALB"
 
-# Look for any output string containing elb.amazonaws.com
-for k, v in data.items():
-  val = extract_value(v)
-  if isinstance(val, str) and "elb.amazonaws.com" in val:
-    alb = val.strip()
-    picked = k
-    break
-
-if not alb:
-  print("ERROR: Could not find any Terraform output containing 'elb.amazonaws.com'.")
-  print("Available outputs:", ", ".join(sorted(data.keys())))
-  sys.exit(1)
-
-print(f"Found ALB output key: {picked}")
-print(f"ALB DNS: {alb}")
-
-with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
-  f.write(f"alb_dns_name={alb}\n")
-PY
-        env:
-          OUT_JSON: ${{ '' }}
-
-      - name: Show ALB + ECR outputs
+      - name: Show URLs
         shell: bash
         run: |
           set -euo pipefail
-          echo "ALB DNS: ${{ steps.capture.outputs.alb_dns_name }}"
-          echo "Smoke path: ${{ inputs.smoke_path }}"
-          echo "ECR repo (Terraform output ecr_repository_url):"
+          echo "HTTPS: https://${{ steps.capture.outputs.alb_dns_name }}${{ inputs.smoke_path }}"
+          echo "HTTP : http://${{ steps.capture.outputs.alb_dns_name }}${{ inputs.smoke_path }}"
+          echo "ECR repo (if present):"
           terraform output -raw ecr_repository_url || true
 
-  ########################################################
-  # DNS — Gate 2
-  ########################################################
   dns:
     name: DNS Smoke Test (dns)
     needs: deploy
@@ -203,9 +189,6 @@ PY
           echo "Smoke test failed (expected 200/301/302)."
           exit 1
 
-  ########################################################
-  # DESTROY — Gate 3
-  ########################################################
   destroy:
     name: Destroy (destroy)
     if: ${{ inputs.action == 'destroy' }}
