@@ -1,6 +1,6 @@
 name: terraform-release
 
-"on":
+on:
   workflow_dispatch:
     inputs:
       action:
@@ -11,16 +11,9 @@ name: terraform-release
         options: [deploy, destroy]
 
       container_image_tag:
-        description: "Container tag to deploy (run-... or sha-...). Leave empty to use the commit SHA."
+        description: "Container tag to deploy (run-... / sha-...). Leave empty to use commit SHA."
         required: false
         default: ""
-
-      two_step_apply:
-        description: "Use two-step apply if S3 destination validation occurs"
-        required: true
-        default: "true"
-        type: choice
-        options: ["true", "false"]
 
       smoke_path:
         description: "Path to test on the ALB (example: /health or /)"
@@ -43,6 +36,9 @@ env:
   WORKDIR: "infra/envs/dev"
 
 jobs:
+  ########################################################
+  # DEV — Gate 1
+  ########################################################
   deploy:
     name: Deploy (dev)
     if: ${{ inputs.action == 'deploy' }}
@@ -61,19 +57,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate required environment secrets
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -z "${{ secrets.AWS_ROLE_ARN_APPLY }}" ]; then
-            echo "ERROR: Environment 'dev' secret AWS_ROLE_ARN_APPLY is missing/empty."
-            exit 1
-          fi
-          if [ -z "${{ secrets.AWS_REGION }}" ]; then
-            echo "ERROR: Environment 'dev' secret AWS_REGION is missing/empty."
-            exit 1
-          fi
-
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -81,7 +64,7 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
           audience: sts.amazonaws.com
 
-      - name: Verify AWS identity (STS)
+      - name: Verify AWS identity
         run: aws sts get-caller-identity
 
       - name: Setup Terraform
@@ -105,131 +88,37 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Using container_image_tag=$TAG"
 
-      - name: Terraform plan (with image tag)
+      - name: Terraform plan
         run: terraform plan -out=tfplan.binary -var="container_image_tag=${{ steps.tag.outputs.tag }}"
 
-      - name: Terraform apply (fast path)
-        id: apply_full
-        continue-on-error: true
+      - name: Terraform apply
         run: terraform apply -auto-approve tfplan.binary
 
-      - name: Detect S3 destination validation error
-        id: detect_s3_validation
-        if: ${{ steps.apply_full.outcome == 'failure' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          terraform apply -auto-approve tfplan.binary 2>tf_err.log || true
-          if grep -q "Unable to validate the following destination configurations" tf_err.log; then
-            echo "hit_validation=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "hit_validation=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Two-step prime (only if needed and enabled)
-        if: ${{ inputs.two_step_apply == 'true' && steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          terraform apply -auto-approve \
-            -target=module.logging.aws_kms_key.sqs_sse \
-            -target=module.logging.aws_kms_alias.sqs_sse \
-            -target=module.logging.aws_sqs_queue.alb_logs_events \
-            -target=module.logging.aws_sqs_queue_policy.alb_logs_events \
-            -target=module.logging.aws_s3_bucket.alb_logs \
-            -target=module.logging.aws_s3_bucket.alb_logs_access \
-            -target=module.logging.aws_s3_bucket_policy.alb_logs \
-            -target=module.logging.aws_s3_bucket_public_access_block.alb_logs \
-            -target=module.logging.aws_s3_bucket_public_access_block.alb_logs_access \
-            -target=module.logging.aws_s3_bucket_server_side_encryption_configuration.alb_logs \
-            -target=module.logging.aws_s3_bucket_server_side_encryption_configuration.alb_logs_access \
-            -target=module.logging.aws_s3_bucket_versioning.alb_logs \
-            -target=module.logging.aws_s3_bucket_versioning.alb_logs_access
-
-      - name: Wait for AWS propagation
-        if: ${{ inputs.two_step_apply == 'true' && steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true' }}
-        run: sleep 120
-
-      - name: Terraform plan (after prime)
-        if: ${{ inputs.two_step_apply == 'true' && steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true' }}
-        run: terraform plan -out=tfplan2.binary -var="container_image_tag=${{ steps.tag.outputs.tag }}"
-
-      - name: Terraform apply (after prime)
-        if: ${{ inputs.two_step_apply == 'true' && steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true' }}
-        run: terraform apply -auto-approve tfplan2.binary
-
-      - name: Fail if apply failed for unknown reason
-        if: ${{ steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation != 'true' }}
-        run: |
-          echo "Terraform apply failed and it was NOT the known S3 destination validation issue."
-          exit 1
-
-      # ✅ Robust capture: auto-detect ALB output key
-      - name: Capture outputs (ALB DNS) + fail fast if missing
+      - name: Capture ALB output + validate
         id: capture
         shell: bash
         run: |
           set -euo pipefail
-
           echo "smoke_path=${{ inputs.smoke_path }}" >> "$GITHUB_OUTPUT"
 
-          echo "Terraform outputs (names):"
+          echo "Terraform outputs:"
           terraform output || true
 
-          OUT_JSON="$(terraform output -json)"
-          python3 - <<'PY'
-import json, os, sys
+          # If your output is not alb_dns_name, change it here.
+          ALB="$(terraform output -raw alb_dns_name 2>/dev/null | tr -d '\r\n\t ')"
 
-data = json.loads(os.environ["OUT_JSON"])
+          if [ -z "$ALB" ]; then
+            echo "ERROR: Terraform output 'alb_dns_name' is missing or empty."
+            echo "Fix: run locally in infra/envs/dev -> terraform output"
+            exit 1
+          fi
 
-def val(k):
-  v = data.get(k)
-  if not v:
-    return None
-  if isinstance(v, dict) and "value" in v:
-    return v["value"]
-  return v
+          echo "alb_dns_name=$ALB" >> "$GITHUB_OUTPUT"
+          echo "ALB DNS: $ALB"
 
-candidates = [
-  "alb_dns_name",
-  "alb_dns",
-  "alb_fqdn",
-  "alb_hostname",
-  "load_balancer_dns_name",
-  "lb_dns_name",
-  "dns_name",
-]
-
-alb = None
-picked = None
-for k in candidates:
-  v = val(k)
-  if isinstance(v, str) and v.strip():
-    alb = v.strip()
-    picked = k
-    break
-
-if not alb:
-  print("ERROR: Could not find an ALB DNS output in Terraform outputs.")
-  print("Available outputs:", ", ".join(sorted(data.keys())))
-  sys.exit(1)
-
-print(f"Found output key: {picked}")
-print(f"ALB DNS: {alb}")
-
-with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
-  f.write(f"alb_dns_name={alb}\n")
-PY
-        env:
-          OUT_JSON: ${{ '' }}
-
-      - name: Show ALB URL
-        run: |
-          echo "ALB DNS: ${{ steps.capture.outputs.alb_dns_name }}"
-          echo "Testing path: ${{ inputs.smoke_path }}"
-          echo "HTTPS: https://${{ steps.capture.outputs.alb_dns_name }}${{ inputs.smoke_path }}"
-          echo "HTTP : http://${{ steps.capture.outputs.alb_dns_name }}${{ inputs.smoke_path }}"
-
+  ########################################################
+  # DNS — Gate 2
+  ########################################################
   dns:
     name: DNS Smoke Test (dns)
     needs: deploy
@@ -279,6 +168,9 @@ PY
           echo "Smoke test failed (expected 200/301/302)."
           exit 1
 
+  ########################################################
+  # DESTROY — Gate 3
+  ########################################################
   destroy:
     name: Destroy (destroy)
     if: ${{ inputs.action == 'destroy' }}
@@ -300,7 +192,7 @@ PY
           aws-region: ${{ secrets.AWS_REGION }}
           audience: sts.amazonaws.com
 
-      - name: Verify AWS identity (STS)
+      - name: Verify AWS identity
         run: aws sts get-caller-identity
 
       - name: Setup Terraform
