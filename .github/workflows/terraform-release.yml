@@ -1,13 +1,6 @@
 name: terraform-release
 
 on:
-  push:
-    branches: ["main"]
-    paths:
-      - "infra/**/*.tf"
-      - "infra/**/terraform.tfvars"
-      - ".github/workflows/terraform-release.yml"
-
   workflow_dispatch:
     inputs:
       action:
@@ -17,22 +10,15 @@ on:
         type: choice
         options: [deploy, destroy]
 
-      image_tag:
-        description: "Container image tag to deploy (e.g., a git SHA). Leave empty to keep current."
+      container_image_tag:
+        description: "Container tag to deploy (git SHA). Required for deploy."
         required: false
         default: ""
 
       two_step_apply:
-        description: "Use two-step apply (prime S3->SQS prereqs, then full apply)"
+        description: "Use two-step apply if S3 destination validation occurs"
         required: true
         default: "true"
-        type: choice
-        options: ["true", "false"]
-
-      teardown_after_test:
-        description: "Destroy infra after smoke test (for temporary testing)"
-        required: true
-        default: "false"
         type: choice
         options: ["true", "false"]
 
@@ -41,9 +27,6 @@ on:
         required: true
         default: "/health"
         type: string
-
-  repository_dispatch:
-    types: [terraform-deploy]
 
 permissions:
   id-token: write
@@ -61,14 +44,11 @@ env:
 
 jobs:
   ############################################################
-  # DEPLOY (dev)
+  # DEV (Deploy / Apply) — Gate 1
   ############################################################
   deploy:
     name: Deploy (dev)
-    if: |
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && inputs.action == 'deploy') ||
-      (github.event_name == 'repository_dispatch' && github.event.action == 'terraform-deploy')
+    if: ${{ inputs.action == 'deploy' }}
     runs-on: ubuntu-latest
     environment: dev
 
@@ -78,15 +58,17 @@ jobs:
 
     outputs:
       alb_dns_name: ${{ steps.tf_outputs.outputs.alb_dns_name }}
+      smoke_path: ${{ inputs.smoke_path }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Apply role should live in environment dev
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_APPLY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Verify AWS identity (STS)
@@ -100,53 +82,19 @@ jobs:
       - name: Terraform init
         run: terraform init -input=false
 
-      - name: Resolve inputs (image_tag / smoke_path / teardown / two_step)
-        id: resolved
+      - name: Require container_image_tag for deploy
         shell: bash
         run: |
           set -euo pipefail
-
-          # Defaults (manual)
-          ACTION="deploy"
-          IMAGE_TAG="${{ github.event_name == 'workflow_dispatch' && inputs.image_tag || '' }}"
-          SMOKE_PATH="${{ github.event_name == 'workflow_dispatch' && inputs.smoke_path || '/health' }}"
-          TEARDOWN="${{ github.event_name == 'workflow_dispatch' && inputs.teardown_after_test || 'false' }}"
-          TWO_STEP="${{ github.event_name == 'workflow_dispatch' && inputs.two_step_apply || 'true' }}"
-
-          # If triggered by repository_dispatch from 03-release.yml, override from payload
-          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            ACTION="${{ github.event.client_payload.action }}"
-            IMAGE_TAG="${{ github.event.client_payload.image_tag }}"
-            SMOKE_PATH="${{ github.event.client_payload.smoke_path }}"
-            TEARDOWN="${{ github.event.client_payload.teardown_after_test }}"
-            TWO_STEP="${{ github.event.client_payload.two_step_apply }}"
+          if [ -z "${{ inputs.container_image_tag }}" ]; then
+            echo "ERROR: container_image_tag is required for deploy (use the SHA from 03-release.yml)."
+            exit 1
           fi
 
-          echo "action=$ACTION" >> "$GITHUB_OUTPUT"
-          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
-          echo "smoke_path=$SMOKE_PATH" >> "$GITHUB_OUTPUT"
-          echo "teardown=$TEARDOWN" >> "$GITHUB_OUTPUT"
-          echo "two_step=$TWO_STEP" >> "$GITHUB_OUTPUT"
+      - name: Terraform plan (with image tag)
+        run: terraform plan -out=tfplan.binary -var="container_image_tag=${{ inputs.container_image_tag }}"
 
-          echo "Resolved:"
-          echo "  action=$ACTION"
-          echo "  image_tag=$IMAGE_TAG"
-          echo "  smoke_path=$SMOKE_PATH"
-          echo "  teardown=$TEARDOWN"
-          echo "  two_step=$TWO_STEP"
-
-      - name: Terraform plan (full)
-        id: plan_full
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -n "${{ steps.resolved.outputs.image_tag }}" ]; then
-            terraform plan -out=tfplan.binary -var="image_tag=${{ steps.resolved.outputs.image_tag }}"
-          else
-            terraform plan -out=tfplan.binary
-          fi
-
-      - name: Terraform apply (full - fast path)
+      - name: Terraform apply (fast path)
         id: apply_full
         continue-on-error: true
         run: terraform apply -auto-approve tfplan.binary
@@ -163,10 +111,8 @@ jobs:
             echo "hit_validation=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Terraform apply (step 1 - prime S3->SQS prereqs)
-        if: |
-          steps.resolved.outputs.two_step == 'true' &&
-          (steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true')
+      - name: Two-step prime (only if needed and enabled)
+        if: ${{ inputs.two_step_apply == 'true' && steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true' }}
         run: |
           set -euo pipefail
           terraform apply -auto-approve \
@@ -185,32 +131,19 @@ jobs:
             -target=module.logging.aws_s3_bucket_versioning.alb_logs_access
 
       - name: Wait for AWS propagation
-        if: |
-          steps.resolved.outputs.two_step == 'true' &&
-          (steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true')
+        if: ${{ inputs.two_step_apply == 'true' && steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true' }}
         run: sleep 120
 
-      - name: Terraform plan (full - after prime)
-        if: |
-          steps.resolved.outputs.two_step == 'true' &&
-          (steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true')
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -n "${{ steps.resolved.outputs.image_tag }}" ]; then
-            terraform plan -out=tfplan2.binary -var="image_tag=${{ steps.resolved.outputs.image_tag }}"
-          else
-            terraform plan -out=tfplan2.binary
-          fi
+      - name: Terraform plan (after prime)
+        if: ${{ inputs.two_step_apply == 'true' && steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true' }}
+        run: terraform plan -out=tfplan2.binary -var="container_image_tag=${{ inputs.container_image_tag }}"
 
-      - name: Terraform apply (full - after prime)
-        if: |
-          steps.resolved.outputs.two_step == 'true' &&
-          (steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true')
+      - name: Terraform apply (after prime)
+        if: ${{ inputs.two_step_apply == 'true' && steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true' }}
         run: terraform apply -auto-approve tfplan2.binary
 
       - name: Fail if apply failed for unknown reason
-        if: ${{ steps.apply_full.outcome == 'failure' && (steps.detect_s3_validation.outputs.hit_validation != 'true') }}
+        if: ${{ steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation != 'true' }}
         run: |
           echo "Terraform apply failed and it was NOT the known S3 destination validation issue."
           exit 1
@@ -223,62 +156,42 @@ jobs:
       - name: Show ALB URL
         run: |
           echo "ALB DNS: ${{ steps.tf_outputs.outputs.alb_dns_name }}"
-          echo "Test HTTPS: https://${{ steps.tf_outputs.outputs.alb_dns_name }}${{ steps.resolved.outputs.smoke_path }}"
-          echo "Test HTTP : http://${{ steps.tf_outputs.outputs.alb_dns_name }}${{ steps.resolved.outputs.smoke_path }}"
+          echo "Try: https://${{ steps.tf_outputs.outputs.alb_dns_name }}${{ inputs.smoke_path }}"
 
   ############################################################
-  # DNS (Smoke Test) - environment gate
+  # DNS — Gate 2
   ############################################################
   dns:
-    name: DNS Smoke Test
+    name: DNS Smoke Test (dns)
     needs: deploy
-    if: ${{ needs.deploy.result == 'success' }}
     runs-on: ubuntu-latest
     environment: dns
 
     steps:
-      - name: Show ALB DNS
-        run: echo "ALB DNS: ${{ needs.deploy.outputs.alb_dns_name }}"
-
       - name: Wait for ALB propagation
         run: sleep 60
 
-      - name: Smoke test (HTTPS first, then HTTP)
+      - name: Smoke test (HTTPS first)
         run: |
           set -euo pipefail
-          PATH_ONLY="/health"
-
-          HTTPS_URL="https://${{ needs.deploy.outputs.alb_dns_name }}${PATH_ONLY}"
-          HTTP_URL="http://${{ needs.deploy.outputs.alb_dns_name }}${PATH_ONLY}"
-
-          echo "Testing HTTPS: $HTTPS_URL"
+          ALB="${{ needs.deploy.outputs.alb_dns_name }}"
+          PATH_ONLY="${{ needs.deploy.outputs.smoke_path }}"
+          HTTPS_URL="https://${ALB}${PATH_ONLY}"
+          echo "Testing: $HTTPS_URL"
           code=$(curl -k -s -o /dev/null -w "%{http_code}" "$HTTPS_URL" || true)
           echo "HTTPS status: $code"
-          if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; then
-            echo "Smoke test passed on HTTPS."
-            exit 0
+          if [ "$code" != "200" ] && [ "$code" != "301" ] && [ "$code" != "302" ]; then
+            echo "Smoke test failed (expected 200/301/302)."
+            exit 1
           fi
-
-          echo "Testing HTTP: $HTTP_URL"
-          code=$(curl -s -o /dev/null -w "%{http_code}" "$HTTP_URL" || true)
-          echo "HTTP status: $code"
-          if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; then
-            echo "Smoke test passed on HTTP."
-            exit 0
-          fi
-
-          echo "Smoke test failed (expected 200/301/302)."
-          exit 1
+          echo "Smoke test passed."
 
   ##########################################################
-  # DESTROY (cleanup) - environment gate
+  # DESTROY — Gate 3 (manual)
   ##########################################################
   destroy:
-    name: Destroy (dev)
-    needs: dns
-    if: |
-      github.event_name == 'workflow_dispatch' &&
-      (inputs.action == 'destroy' || inputs.teardown_after_test == 'true')
+    name: Destroy (destroy)
+    if: ${{ inputs.action == 'destroy' }}
     runs-on: ubuntu-latest
     environment: destroy
 
@@ -293,7 +206,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_APPLY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Verify AWS identity (STS)
