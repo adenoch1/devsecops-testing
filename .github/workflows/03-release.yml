@@ -154,5 +154,5 @@ jobs:
           echo "  ${{ steps.meta.outputs.image_uri }}:${{ steps.meta.outputs.deploy_tag }}"
           echo ""
           echo "NEXT (manual, gated): Run terraform-release with:"
-          echo "  action=deploy"
+          echo "  action=deploy."
           echo "  container_image_tag=${{ steps.meta.outputs.deploy_tag }}"
