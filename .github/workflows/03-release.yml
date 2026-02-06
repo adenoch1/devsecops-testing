@@ -25,18 +25,17 @@ env:
 jobs:
   build_push_scan:
     name: Build + Push + Scan (ECR)
-    runs-on: ubuntu-latest
-    environment: dev
+    runs-on: ubuntu-latest   # ✅ no environment gate here
 
     outputs:
-      ecr_image_uri: ${{ steps.meta.outputs.image_uri }}
-      image_tag: ${{ steps.meta.outputs.tag }}
+      image_uri: ${{ steps.meta.outputs.image_uri }}
+      deploy_tag: ${{ steps.meta.outputs.deploy_tag }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Use APPLY/ECR role from environment dev
+      # OIDC → AWS (use the APPLY role because ECR push requires write)
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -50,7 +49,7 @@ jobs:
         id: ecr_login
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Compute ECR image URI + immutable tag (SHA)
+      - name: Compute ECR repo + tags
         id: meta
         shell: bash
         run: |
@@ -70,19 +69,52 @@ jobs:
 
           REGISTRY="${{ steps.ecr_login.outputs.registry }}"
           IMAGE_URI="${REGISTRY}/${REPO_NAME}"
-          TAG="${GITHUB_SHA}"
+
+          # Stable tag (may already exist)
+          SHA_TAG="sha-${GITHUB_SHA}"
+
+          # Unique per run (always safe with immutability)
+          RUN_TAG="run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
           echo "REPO_NAME=$REPO_NAME" >> $GITHUB_ENV
           echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+          echo "SHA_TAG=$SHA_TAG" >> $GITHUB_ENV
+          echo "RUN_TAG=$RUN_TAG" >> $GITHUB_ENV
 
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Verify ECR repository exists
+          # ✅ For deployment, we will use RUN_TAG (always exists and always unique)
+          echo "deploy_tag=$RUN_TAG" >> $GITHUB_OUTPUT
+
+          echo "IMAGE_URI=$IMAGE_URI"
+          echo "SHA_TAG=$SHA_TAG"
+          echo "RUN_TAG=$RUN_TAG"
+          echo "DEPLOY_TAG (use this in terraform-release) = $RUN_TAG"
+
+      - name: Ensure ECR repository exists (explain if missing)
         shell: bash
         run: |
           set -euo pipefail
-          aws ecr describe-repositories --repository-names "${REPO_NAME}" >/dev/null
+          if aws ecr describe-repositories --repository-names "${REPO_NAME}" >/dev/null 2>&1; then
+            echo "ECR repo exists: ${REPO_NAME}"
+          else
+            echo "ERROR: ECR repo ${REPO_NAME} does not exist yet."
+            echo "Run terraform-release (deploy) once to create infra/ECR repo, then re-run 03-release."
+            exit 1
+          fi
+
+      - name: Check whether SHA tag already exists (immutable-safe)
+        id: tag_exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          if aws ecr describe-images --repository-name "${REPO_NAME}" --image-ids imageTag="${SHA_TAG}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "SHA tag already exists in ECR: ${SHA_TAG} (will not try to overwrite)"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "SHA tag does not exist yet: ${SHA_TAG} (will push it)"
+          fi
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -90,7 +122,8 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push image to ECR (immutable tag)
+      # ✅ Always push RUN_TAG; push SHA_TAG only if it doesn't exist.
+      - name: Build and push image to ECR (immutable-safe)
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -100,13 +133,14 @@ jobs:
           pull: true
           no-cache: true
           tags: |
-            ${{ env.IMAGE_URI }}:${{ steps.meta.outputs.tag }}
+            ${{ env.IMAGE_URI }}:${{ env.RUN_TAG }}
+            ${{ steps.tag_exists.outputs.exists == 'false' && format('{0}:{1}', env.IMAGE_URI, env.SHA_TAG) || '' }}
 
-      - name: Trivy scan (HIGH/CRITICAL gate)
+      - name: Trivy scan (HIGH/CRITICAL gate) on pushed RUN tag
         uses: aquasecurity/trivy-action@0.24.0
         with:
           scan-type: image
-          image-ref: ${{ env.IMAGE_URI }}@${{ steps.build.outputs.digest }}
+          image-ref: ${{ env.IMAGE_URI }}:${{ env.RUN_TAG }}
           format: table
           exit-code: "1"
           ignore-unfixed: false
@@ -114,12 +148,11 @@ jobs:
           severity: "HIGH,CRITICAL"
           scanners: "vuln"
 
-      - name: Output next step instructions (for gated production flow)
+      - name: Output the tag to deploy (copy this into terraform-release)
         run: |
-          echo "✅ Image pushed to ECR::"
-          echo "  ${{ steps.meta.outputs.image_uri }}:${{ steps.meta.outputs.tag }}"
+          echo "✅ Image pushed to ECR:"
+          echo "  ${{ steps.meta.outputs.image_uri }}:${{ steps.meta.outputs.deploy_tag }}"
           echo ""
-          echo "NEXT (manual): Run terraform-release workflow with:"
+          echo "NEXT (manual, gated): Run terraform-release with:"
           echo "  action=deploy"
-          echo "  container_image_tag=${{ steps.meta.outputs.tag }}"
-          echo "This will pause at dev/dns/destroy gates if your environments require approvals."
+          echo "  container_image_tag=${{ steps.meta.outputs.deploy_tag }}"
