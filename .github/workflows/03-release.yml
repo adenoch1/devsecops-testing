@@ -45,7 +45,7 @@ jobs:
             echo "ERROR: secrets.AWS_REGION is empty or not available."
             exit 1
           fi
-          echo "Secrets look present."
+          echo "Secrets look present"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
