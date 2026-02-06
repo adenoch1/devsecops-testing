@@ -93,43 +93,46 @@ jobs:
       - name: Terraform apply
         run: terraform apply -auto-approve tfplan.binary
 
-      - name: Capture ALB DNS + validate
-        id: capture
-        shell: bash
-        run: |
-          set -euo pipefail
+      - name: Capture ALB DNS + validate (must not be empty)
+  id: capture
+  shell: bash
+  run: |
+    set -euo pipefail
 
-          echo "smoke_path=${{ inputs.smoke_path }}" >> "$GITHUB_OUTPUT"
+    echo "smoke_path=${{ inputs.smoke_path }}" >> "$GITHUB_OUTPUT"
 
-          echo "Terraform outputs:"
-          terraform output || true
+    echo "Terraform outputs (raw):"
+    terraform output || true
 
-          # Try common output keys first (fast)
-          ALB=""
-          for key in alb_dns_name load_balancer_dns_name lb_dns_name dns_name; do
-            if terraform output -raw "$key" >/dev/null 2>&1; then
-              v="$(terraform output -raw "$key" | tr -d '\r\n\t ')"
-              if [ -n "$v" ] && echo "$v" | grep -q "elb.amazonaws.com"; then
-                ALB="$v"
-                echo "Found ALB output key: $key"
-                break
-              fi
-            fi
-          done
+    # Fallback scan for elb hostname from outputs (works even if output key differs)
+    ALB="$(terraform output 2>/dev/null | grep -Eo '[a-zA-Z0-9-]+\.([a-z0-9-]+\.)?elb\.amazonaws\.com' | head -n1 || true)"
 
-          # Fallback: scan all outputs for an elb hostname
-          if [ -z "$ALB" ]; then
-            ALB="$(terraform output 2>/dev/null | grep -Eo '[a-zA-Z0-9-]+\.([a-z0-9-]+\.)?elb\.amazonaws\.com' | head -n1 || true)"
+    # If still empty, try common output keys explicitly
+    if [ -z "$ALB" ]; then
+      for key in alb_dns_name load_balancer_dns_name lb_dns_name dns_name; do
+        if terraform output -raw "$key" >/dev/null 2>&1; then
+          v="$(terraform output -raw "$key" | tr -d '\r\n\t ')"
+          if [ -n "$v" ] && echo "$v" | grep -q "elb.amazonaws.com"; then
+            ALB="$v"
+            echo "Found ALB output key: $key"
+            break
           fi
+        fi
+      done
+    fi
 
-          if [ -z "$ALB" ]; then
-            echo "ERROR: Could not find an ALB DNS name in terraform outputs."
-            echo "Run locally: cd infra/envs/dev ; terraform output"
-            exit 1
-          fi
+    echo "Resolved ALB DNS: '$ALB'"
 
-          echo "alb_dns_name=$ALB" >> "$GITHUB_OUTPUT"
-          echo "ALB DNS: $ALB"
+    if [ -z "$ALB" ]; then
+      echo "ERROR: Could not find an ALB DNS name in terraform outputs."
+      echo "This means your Terraform module is not exporting the ALB DNS as an output, OR apply did not create the ALB."
+      echo "Fix: Add an output in infra modules for ALB DNS, or paste `terraform output` names here."
+      exit 1
+    fi
+
+    echo "alb_dns_name=$ALB" >> "$GITHUB_OUTPUT"
+    echo "Wrote alb_dns_name to GITHUB_OUTPUT."
+
 
       - name: Show URLs
         shell: bash
