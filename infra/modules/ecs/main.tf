@@ -253,9 +253,9 @@ resource "aws_ecs_cluster" "this" {
   })
 }
 
-# -----------------------------
+# -------------------------------
 # ECS Task Definition
-# -----------------------------
+# -------------------------------
 resource "aws_ecs_task_definition" "this" {
   family                   = "${var.name_prefix}-task"
   requires_compatibilities = ["FARGATE"]
