@@ -116,7 +116,7 @@ jobs:
 
       - name: Output next step instructions (for gated production flow)
         run: |
-          echo "✅ Image pushed to ECR:"
+          echo "✅ Image pushed to ECR::"
           echo "  ${{ steps.meta.outputs.image_uri }}:${{ steps.meta.outputs.tag }}"
           echo ""
           echo "NEXT (manual): Run terraform-release workflow with:"
