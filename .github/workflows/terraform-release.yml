@@ -11,7 +11,7 @@ on:
         options: [deploy, destroy]
 
       container_image_tag:
-        description: "Container tag to deploy (git SHA). Required for deploy."
+        description: "Container tag to deploy (git SHA). Leave empty to use the commit SHA."
         required: false
         default: ""
 
@@ -43,9 +43,9 @@ env:
   WORKDIR: "infra/envs/dev"
 
 jobs:
-  ############################################################
+  ###########################################################
   # DEV (Deploy / Apply) — Gate 1
-  ############################################################
+  ###########################################################
   deploy:
     name: Deploy (dev)
     if: ${{ inputs.action == 'deploy' }}
@@ -82,17 +82,24 @@ jobs:
       - name: Terraform init
         run: terraform init -input=false
 
-      - name: Require container_image_tag for deploy
+      # ✅ NEW: resolve tag automatically if not provided
+      - name: Resolve container image tag
+        id: tag
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${{ inputs.container_image_tag }}" ]; then
-            echo "ERROR: container_image_tag is required for deploy (use the SHA from 03-release.yml)."
-            exit 1
+
+          if [ -n "${{ inputs.container_image_tag }}" ]; then
+            TAG="${{ inputs.container_image_tag }}"
+          else
+            TAG="${GITHUB_SHA}"
           fi
 
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Using container_image_tag=$TAG"
+
       - name: Terraform plan (with image tag)
-        run: terraform plan -out=tfplan.binary -var="container_image_tag=${{ inputs.container_image_tag }}"
+        run: terraform plan -out=tfplan.binary -var="container_image_tag=${{ steps.tag.outputs.tag }}"
 
       - name: Terraform apply (fast path)
         id: apply_full
@@ -136,7 +143,7 @@ jobs:
 
       - name: Terraform plan (after prime)
         if: ${{ inputs.two_step_apply == 'true' && steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true' }}
-        run: terraform plan -out=tfplan2.binary -var="container_image_tag=${{ inputs.container_image_tag }}"
+        run: terraform plan -out=tfplan2.binary -var="container_image_tag=${{ steps.tag.outputs.tag }}"
 
       - name: Terraform apply (after prime)
         if: ${{ inputs.two_step_apply == 'true' && steps.apply_full.outcome == 'failure' && steps.detect_s3_validation.outputs.hit_validation == 'true' }}
