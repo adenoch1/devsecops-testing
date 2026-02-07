@@ -51,10 +51,6 @@ jobs:
       run:
         working-directory: ${{ env.WORKDIR }}
 
-    outputs:
-      alb_dns_name: ${{ steps.capture.outputs.alb_dns_name }}
-      smoke_path: ${{ steps.capture.outputs.smoke_path }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -87,8 +83,8 @@ jobs:
           else
             TAG="${GITHUB_SHA}"
           fi
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Using container_image_tag=$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Terraform plan
         run: terraform plan -out=tfplan.binary -var="container_image_tag=${{ steps.tag.outputs.tag }}"
@@ -96,53 +92,58 @@ jobs:
       - name: Terraform apply
         run: terraform apply -auto-approve tfplan.binary
 
-      - name: Capture ALB DNS (authoritative)
-        id: capture
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "smoke_path=${{ inputs.smoke_path }}" >> "$GITHUB_OUTPUT"
-
-          echo "Terraform outputs:"
-          terraform output
-
-          ALB="$(terraform output -raw alb_dns_name | tr -d '\r\n\t ')"
-          if [ -z "$ALB" ]; then
-            echo "ERROR: terraform output -raw alb_dns_name returned empty."
-            exit 1
-          fi
-
-          echo "Captured ALB: $ALB"
-          echo "alb_dns_name=$ALB" >> "$GITHUB_OUTPUT"
-
-      - name: Show what will be tested
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "ALB DNS (job output): ${{ steps.capture.outputs.alb_dns_name }}"
-          echo "HTTPS: https://${{ steps.capture.outputs.alb_dns_name }}${{ inputs.smoke_path }}"
-          echo "HTTP : http://${{ steps.capture.outputs.alb_dns_name }}${{ inputs.smoke_path }}"
+      - name: Show Terraform outputs (for visibility)
+        run: terraform output
 
   ########################################################
-  # DNS — Gate 2
+  # DNS — Gate 2 (re-reads state directly)
   ########################################################
   dns:
     name: DNS Smoke Test (dns)
     needs: deploy
+    if: ${{ inputs.action == 'deploy' }}
     runs-on: ubuntu-latest
     environment: dns
 
+    defaults:
+      run:
+        working-directory: ${{ env.WORKDIR }}
+
     steps:
-      - name: Assert ALB DNS is present
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_APPLY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Read ALB DNS from Terraform state
+        id: read
         shell: bash
         run: |
           set -euo pipefail
-          echo "ALB from deploy outputs: '${{ needs.deploy.outputs.alb_dns_name }}'"
-          if [ -z "${{ needs.deploy.outputs.alb_dns_name }}" ]; then
-            echo "ERROR: ALB DNS output is empty from deploy job."
+          ALB="$(terraform output -raw alb_dns_name | tr -d '\r\n\t ')"
+          if [ -z "$ALB" ]; then
+            echo "ERROR: terraform output -raw alb_dns_name returned empty."
+            terraform output
             exit 1
           fi
+          echo "alb=$ALB" >> "$GITHUB_OUTPUT"
+          echo "ALB DNS: $ALB"
 
       - name: Wait for ALB propagation
         run: sleep 60
@@ -151,8 +152,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ALB="${{ needs.deploy.outputs.alb_dns_name }}"
-          PATH_ONLY="${{ needs.deploy.outputs.smoke_path }}"
+          ALB="${{ steps.read.outputs.alb }}"
+          PATH_ONLY="${{ inputs.smoke_path }}"
 
           HTTPS_URL="https://${ALB}${PATH_ONLY}"
           HTTP_URL="http://${ALB}${PATH_ONLY}"
