@@ -95,9 +95,4 @@ variable "log_retention_days" {
   default     = 14
 }
 
-variable "alb_deletion_protection" {
-  type        = bool
-  description = "Enable ALB deletion protection (true for prod, false for dev)"
-  default     = false
-}
 
