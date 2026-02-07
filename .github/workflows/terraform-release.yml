@@ -183,7 +183,7 @@ jobs:
           set -euo pipefail
           if [ -z "${FQDN}" ]; then
             echo "ERROR: FQDN is empty."
-            echo "Fix for push-to-main runs: set repo or dns-environment secret FQDN (example: app.clevernews.org)."
+            echo "Fix for push-to-main runs: set repo or environment secret FQDN (example: app.clevernews.org)."
             exit 1
           fi
           echo "Testing https://${FQDN}${SMOKE_PATH}"
@@ -239,7 +239,7 @@ jobs:
   ########################################################
   # Gate 3 (DESTROY): requires manual approval via env
   # - Disables ALB deletion protection JUST-IN-TIME
-  # - Waits for AWS cleanup (prevents IGW detach dependency violation)
+  # - Waits for AWS to release any public mappings (eventual consistency)
   # - Then terraform destroy
   ########################################################
   destroy_after_deploy:
@@ -286,23 +286,18 @@ jobs:
             echo "No alb_arn output found (maybe already destroyed). Skipping."
           fi
 
-      - name: Wait for AWS VPC cleanup (IGW detach safety)
+      - name: Wait for AWS to release public IP mappings (IGW safety)
         shell: bash
         run: |
           set -euo pipefail
 
-          if ! terraform state show -no-color module.network.aws_vpc.this >/dev/null 2>&1; then
-            echo "VPC not found in state. Skipping wait."
+          if ! terraform output -raw vpc_id >/dev/null 2>&1; then
+            echo "VPC ID not found in terraform outputs. Skipping wait."
             exit 0
           fi
 
-          VPC_ID="$(terraform state show -no-color module.network.aws_vpc.this | awk '/^id\s+=/ {print $3}')"
-          if [ -z "$VPC_ID" ]; then
-            echo "Could not determine VPC ID from state. Skipping wait."
-            exit 0
-          fi
-
-          echo "Waiting for AWS to fully release any public mappings in VPC: $VPC_ID"
+          VPC_ID="$(terraform output -raw vpc_id)"
+          echo "Waiting for AWS to fully release public mappings in VPC: $VPC_ID"
 
           for i in {1..40}; do
             COUNT="$(aws ec2 describe-network-interfaces \
@@ -311,19 +306,23 @@ jobs:
               --output text)"
 
             echo "Attempt $i — public ENIs with public IPs: $COUNT"
+
             if [ "$COUNT" = "0" ]; then
               echo "AWS cleanup complete ✅"
-              break
+              exit 0
             fi
+
             sleep 15
           done
+
+          echo "WARNING: AWS cleanup timeout reached, proceeding anyway"
 
       - name: Terraform destroy
         run: terraform destroy -auto-approve -parallelism=1
 
-  ######################################################
+  ########################################################
   # Standalone destroy (manual)
-  ######################################################
+  ########################################################
   destroy_only:
     name: Destroy (standalone)
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.action == 'destroy' }}
@@ -367,23 +366,18 @@ jobs:
             echo "No alb_arn output found (maybe already destroyed). Skipping."
           fi
 
-      - name: Wait for AWS VPC cleanup (IGW detach safety)
+      - name: Wait for AWS to release public IP mappings (IGW safety)
         shell: bash
         run: |
           set -euo pipefail
 
-          if ! terraform state show -no-color module.network.aws_vpc.this >/dev/null 2>&1; then
-            echo "VPC not found in state. Skipping wait."
+          if ! terraform output -raw vpc_id >/dev/null 2>&1; then
+            echo "VPC ID not found in terraform outputs. Skipping wait."
             exit 0
           fi
 
-          VPC_ID="$(terraform state show -no-color module.network.aws_vpc.this | awk '/^id\s+=/ {print $3}')"
-          if [ -z "$VPC_ID" ]; then
-            echo "Could not determine VPC ID from state. Skipping wait."
-            exit 0
-          fi
-
-          echo "Waiting for AWS to fully release any public mappings in VPC: $VPC_ID"
+          VPC_ID="$(terraform output -raw vpc_id)"
+          echo "Waiting for AWS to fully release public mappings in VPC: $VPC_ID"
 
           for i in {1..40}; do
             COUNT="$(aws ec2 describe-network-interfaces \
@@ -392,12 +386,16 @@ jobs:
               --output text)"
 
             echo "Attempt $i — public ENIs with public IPs: $COUNT"
+
             if [ "$COUNT" = "0" ]; then
-              echo "AWS cleanup complete ✅"
-              break
+              echo "AWS cleanup complete"
+              exit 0
             fi
+
             sleep 15
           done
+
+          echo "WARNING: AWS cleanup timeout reached, proceeding anyway"
 
       - name: Terraform destroy
         run: terraform destroy -auto-approve -parallelism=1
