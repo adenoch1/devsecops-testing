@@ -199,6 +199,12 @@ jobs:
     runs-on: ubuntu-latest
     environment: destroy
 
+    env:
+      # 🔥 Temporary override ONLY for teardown so ALB can be deleted
+      TF_VAR_alb_deletion_protection: "false"
+      # Ensure required var never blocks destroy
+      TF_VAR_container_image_tag: ${{ github.sha }}
+
     defaults:
       run:
         working-directory: ${{ env.WORKDIR }}
@@ -226,8 +232,15 @@ jobs:
       - name: Terraform init
         run: terraform init -input=false
 
+      - name: Pre-destroy apply (disable ALB deletion protection)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Temporarily disabling ALB deletion protection for teardown..."
+          terraform apply -auto-approve -var="alb_deletion_protection=false" -var="container_image_tag=${TF_VAR_container_image_tag}"
+
       - name: Terraform destroy
-        run: terraform destroy -auto-approve
+        run: terraform destroy -auto-approve -parallelism=1
 
 
   ######################################################
@@ -238,6 +251,12 @@ jobs:
     if: ${{ inputs.action == 'destroy' }}
     runs-on: ubuntu-latest
     environment: destroy
+
+    env:
+      # 🔥 Temporary override ONLY for teardown so ALB can be deleted
+      TF_VAR_alb_deletion_protection: "false"
+      # Ensure required var never blocks destroy
+      TF_VAR_container_image_tag: ${{ github.sha }}
 
     defaults:
       run:
@@ -265,5 +284,12 @@ jobs:
       - name: Terraform init
         run: terraform init -input=false
 
+      - name: Pre-destroy apply (disable ALB deletion protection)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Temporarily disabling ALB deletion protection for teardown..."
+          terraform apply -auto-approve -var="alb_deletion_protection=false" -var="container_image_tag=${TF_VAR_container_image_tag}"
+
       - name: Terraform destroy
-        run: terraform destroy -auto-approve
+        run: terraform destroy -auto-approve -parallelism=1
