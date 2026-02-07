@@ -388,7 +388,7 @@ jobs:
             echo "Attempt $i — public ENIs with public IPs: $COUNT"
 
             if [ "$COUNT" = "0" ]; then
-              echo "AWS cleanup complete ✅"
+              echo "AWS cleanup complete"
               exit 0
             fi
 
