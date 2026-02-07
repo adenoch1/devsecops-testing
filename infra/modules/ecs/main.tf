@@ -94,7 +94,6 @@ resource "aws_lb" "this" {
   drop_invalid_header_fields = true
 
   enable_deletion_protection = true
-  depends_on = [var.alb_logs_bucket_policy_ready]
 
 
   access_logs {
