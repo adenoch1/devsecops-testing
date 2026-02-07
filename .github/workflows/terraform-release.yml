@@ -12,6 +12,12 @@ on:
           - deploy
           - destroy
 
+      run_destroy_after_deploy:
+        description: "If true, runs the destroy gate after DNS gate (cleanup)"
+        required: true
+        default: false
+        type: boolean
+
       container_image_tag:
         description: "Container tag to deploy (leave empty to use commit SHA)"
         required: false
@@ -60,7 +66,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # OIDC auth (this is where AWS access is required)
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -103,8 +108,7 @@ jobs:
 
 
   ########################################################
-  # DNS — Gate 2: Production-style external verification
-  # No AWS credentials. Validates the real user endpoint.
+  # DNS — Gate 2: External verification (no AWS creds)
   ########################################################
   dns:
     name: DNS Gate (External Smoke Test)
@@ -120,7 +124,7 @@ jobs:
           set -euo pipefail
           FQDN="${{ inputs.fqdn }}"
           if [ -z "$FQDN" ]; then
-            echo "ERROR: fqdn input is required for DNS gate (example: app.clevernews.org)."
+            echo "ERROR: fqdn input is required (example: app.clevernews.org)."
             exit 1
           fi
           echo "FQDN set to: $FQDN"
@@ -135,7 +139,6 @@ jobs:
           echo "Checking DNS resolution for: $FQDN"
           for i in {1..12}; do
             echo "Attempt $i..."
-            # Try A/AAAA records (common) — some setups may not show CNAME directly.
             A="$(dig +short A "$FQDN" || true)"
             AAAA="$(dig +short AAAA "$FQDN" || true)"
             CNAME="$(dig +short CNAME "$FQDN" || true)"
@@ -166,7 +169,6 @@ jobs:
           FQDN="${{ inputs.fqdn }}"
           PATH_ONLY="${{ inputs.smoke_path }}"
 
-          # Make sure path begins with /
           if [[ "$PATH_ONLY" != /* ]]; then
             PATH_ONLY="/$PATH_ONLY"
           fi
@@ -174,14 +176,11 @@ jobs:
           URL="https://${FQDN}${PATH_ONLY}"
           echo "Testing URL: $URL"
 
-          # Retry window: ~3 minutes total (10 * 18s)
           for i in {1..10}; do
             echo "Attempt $i..."
             code="$(curl -k -s -o /dev/null -w "%{http_code}" "$URL" || true)"
             echo "HTTP status: $code"
 
-            # Accept common “service is up” responses:
-            # 200 OK (healthy), 301/302 redirect (still serving)
             if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; then
               echo "DNS gate passed ✅"
               exit 0
@@ -195,10 +194,50 @@ jobs:
 
 
   ########################################################
-  # DESTROY — Gate 3: Terraform Destroy
+  # DESTROY — Gate 3 (optional cleanup after deploy+dns)
   ########################################################
-  destroy:
-    name: Destroy (destroy)
+  destroy_after_deploy:
+    name: Destroy (after deploy)
+    needs: dns
+    if: ${{ inputs.action == 'deploy' && inputs.run_destroy_after_deploy == true }}
+    runs-on: ubuntu-latest
+    environment: destroy
+
+    defaults:
+      run:
+        working-directory: ${{ env.WORKDIR }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_APPLY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform destroy
+        run: terraform destroy -auto-approve
+
+
+  ########################################################
+  # DESTROY — Standalone run (when action=destroy)
+  ########################################################
+  destroy_only:
+    name: Destroy (standalone)
     if: ${{ inputs.action == 'destroy' }}
     runs-on: ubuntu-latest
     environment: destroy
@@ -211,7 +250,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # OIDC auth needed for destroy
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
