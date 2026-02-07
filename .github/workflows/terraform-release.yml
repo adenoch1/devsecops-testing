@@ -18,13 +18,13 @@ on:
         default: ""
 
       smoke_path:
-        description: "Path to test on the endpoint (example: /health or /)"
+        description: "Path to test (example: /health or /)"
         required: true
         default: "/health"
         type: string
 
       fqdn:
-        description: "Optional: Your custom domain to test (example: app.clevernews.org). Leave blank to test ALB DNS directly."
+        description: "Optional: test your domain (example: app.clevernews.org). Leave blank to test ALB DNS directly."
         required: false
         default: ""
 
@@ -43,9 +43,6 @@ env:
   WORKDIR: "infra/envs/dev"
 
 jobs:
-  ########################################################
-  # DEV — Gate 1
-  ########################################################
   deploy:
     name: Deploy (dev)
     if: ${{ inputs.action == 'deploy' }}
@@ -97,13 +94,10 @@ jobs:
       - name: Terraform apply
         run: terraform apply -auto-approve tfplan.binary
 
-      - name: Show Terraform outputs (for visibility)
+      - name: Show Terraform outputs (visibility)
         run: terraform output
 
 
-  ########################################################
-  # DNS — Gate 2 (Production-style: re-reads remote state)
-  ########################################################
   dns:
     name: DNS Smoke Test (dns)
     needs: deploy
@@ -142,51 +136,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          echo "Reading terraform output from state..."
+          terraform output || true
+
           ALB="$(terraform output -raw alb_dns_name | tr -d '\r\n\t ')"
-          echo "ALB DNS from terraform state: '$ALB'"
+          echo "ALB from terraform state: '$ALB'"
+
           if [ -z "$ALB" ]; then
             echo "ERROR: terraform output -raw alb_dns_name returned empty."
-            echo "DEBUG: terraform output (all):"
-            terraform output || true
             exit 1
           fi
+
           echo "alb=$ALB" >> "$GITHUB_OUTPUT"
 
-      - name: Wait for ALB readiness
+      - name: Wait for readiness
         run: sleep 30
-
-      - name: Optional DNS validation (FQDN -> should CNAME to ALB)
-        if: ${{ inputs.fqdn != '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          FQDN="${{ inputs.fqdn }}"
-          ALB="${{ steps.read.outputs.alb }}"
-
-          echo "Validating DNS for: $FQDN"
-          echo "Expected to point to ALB: $ALB"
-
-          # We try a few times because DNS can take time to propagate
-          for i in {1..12}; do
-            echo "Attempt $i: Checking CNAME chain..."
-            # +short can return multiple lines; we capture all
-            CNAME_CHAIN="$(dig +short CNAME "$FQDN" || true)"
-            echo "CNAME(s):"
-            echo "$CNAME_CHAIN"
-
-            # If the chain contains the ALB DNS (or ends with it), we're good.
-            if echo "$CNAME_CHAIN" | grep -qi "$ALB"; then
-              echo "DNS CNAME looks good."
-              exit 0
-            fi
-
-            echo "Not matching yet. Sleeping 20s..."
-            sleep 20
-          done
-
-          echo "WARNING: DNS CNAME did not show ALB within retries."
-          echo "Continuing to HTTP smoke test anyway (maybe flattening/aliasing hides it)."
-
 
       - name: Smoke test (FQDN if provided, else ALB)
         shell: bash
@@ -199,10 +163,10 @@ jobs:
 
           if [ -n "$FQDN" ]; then
             HOST="$FQDN"
-            echo "Using FQDN endpoint: $HOST"
+            echo "Testing FQDN: $HOST"
           else
             HOST="$ALB"
-            echo "Using ALB endpoint: $HOST"
+            echo "Testing ALB: $HOST"
           fi
 
           HTTPS_URL="https://${HOST}${PATH_ONLY}"
@@ -224,13 +188,10 @@ jobs:
             exit 0
           fi
 
-          echo "Smoke test failed (expected 200/301/302)."
+          echo "Smoke test failed."
           exit 1
 
 
-  ########################################################
-  # DESTROY — Gate 3
-  ########################################################
   destroy:
     name: Destroy (destroy)
     if: ${{ inputs.action == 'destroy' }}
