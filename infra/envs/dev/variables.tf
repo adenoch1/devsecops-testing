@@ -101,3 +101,9 @@ variable "replication_region" {
   description = "Secondary region for replication"
   default     = "us-east-1"
 }
+
+variable "health_check_path" {
+  type        = string
+  description = "HTTP path that ALB uses to health-check the service"
+  default     = "/"
+}
