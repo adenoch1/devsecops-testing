@@ -1,13 +1,42 @@
 name: 03-release (ECR)
 
 on:
-  push:
-    branches: ["main"]
-    paths:
-      - "app/**"
-      - "docker/**"
-      - ".github/workflows/03-release.yml"
+  workflow_call:
+    inputs:
+      tfvars_path:
+        description: "Path to terraform.tfvars used to compute name_prefix"
+        required: false
+        type: string
+        default: "infra/envs/dev/terraform.tfvars"
+      dockerfile_path:
+        description: "Dockerfile path"
+        required: false
+        type: string
+        default: "docker/Dockerfile"
+      build_context:
+        description: "Docker build context"
+        required: false
+        type: string
+        default: "."
+      image_tag:
+        description: "Tag to use for the pushed image"
+        required: true
+        type: string
+    outputs:
+      deploy_tag:
+        description: "The tag pushed to ECR"
+        value: ${{ jobs.build_push.outputs.deploy_tag }}
+      image_uri:
+        description: "ECR image URI (registry/repo)"
+        value: ${{ jobs.build_push.outputs.image_uri }}
+
   workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to push (example: commit SHA)"
+        required: true
+        type: string
+        default: "manual"
 
 permissions:
   contents: read
@@ -17,35 +46,18 @@ concurrency:
   group: 03-release-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  DOCKERFILE_PATH: docker/Dockerfile
-  BUILD_CONTEXT: .
-  TFVARS_PATH: infra/envs/dev/terraform.tfvars
-
 jobs:
-  build_push_scan:
-    name: Build + Push + Scan (ECR)
+  build_push:
+    name: Build + Push (ECR)
     runs-on: ubuntu-latest
+
+    outputs:
+      deploy_tag: ${{ steps.meta.outputs.deploy_tag }}
+      image_uri: ${{ steps.meta.outputs.image_uri }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      # ✅ Fail fast if the role is missing in this scope..
-      - name: Validate required secrets are present
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -z "${{ secrets.AWS_ROLE_ARN_ECR }}" ]; then
-            echo "ERROR: secrets.AWS_ROLE_ARN_ECR is empty or not available to this workflow."
-            echo "Fix: Add AWS_ROLE_ARN_ECR to Repo Settings → Secrets and variables → Actions → Secrets."
-            exit 1
-          fi
-          if [ -z "${{ secrets.AWS_REGION }}" ]; then
-            echo "ERROR: secrets.AWS_REGION is empty or not available."
-            exit 1
-          fi
-          echo "Secrets look present"
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -61,13 +73,18 @@ jobs:
         id: ecr_login
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Compute ECR repo + unique tag
+      - name: Compute ECR repo + tag
         id: meta
         shell: bash
         run: |
           set -euo pipefail
 
-          TFVARS="${{ env.TFVARS_PATH }}"
+          TFVARS="${{ inputs.tfvars_path }}"
+          if [ ! -f "$TFVARS" ]; then
+            echo "ERROR: tfvars not found at: $TFVARS"
+            exit 1
+          fi
+
           PROJECT=$(grep -E '^\s*project\s*=' "$TFVARS" | head -n1 | awk -F\" '{print $2}')
           ENVIRONMENT=$(grep -E '^\s*environment\s*=' "$TFVARS" | head -n1 | awk -F\" '{print $2}')
 
@@ -82,19 +99,22 @@ jobs:
           REGISTRY="${{ steps.ecr_login.outputs.registry }}"
           IMAGE_URI="${REGISTRY}/${REPO_NAME}"
 
-          RUN_TAG="run-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          TAG="${{ inputs.image_tag }}"
+          if [ -z "$TAG" ]; then
+            echo "ERROR: image_tag input is empty."
+            exit 1
+          fi
 
           echo "REPO_NAME=$REPO_NAME" >> $GITHUB_ENV
           echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
-          echo "RUN_TAG=$RUN_TAG" >> $GITHUB_ENV
 
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
-          echo "deploy_tag=$RUN_TAG" >> $GITHUB_OUTPUT
+          echo "deploy_tag=$TAG" >> $GITHUB_OUTPUT
 
           echo "IMAGE_URI=$IMAGE_URI"
-          echo "DEPLOY_TAG=$RUN_TAG"
+          echo "DEPLOY_TAG=$TAG"
 
-      - name: Verify ECR repository exists (clear message if missing)
+      - name: Guardrail — verify ECR repository exists
         shell: bash
         run: |
           set -euo pipefail
@@ -102,7 +122,8 @@ jobs:
             echo "ECR repo exists: ${REPO_NAME}"
           else
             echo "ERROR: ECR repo ${REPO_NAME} does not exist."
-            echo "Action: run terraform-release (deploy) once to create ECR repo, then re-run 03-release."
+            echo "This must be created by Terraform first."
+            echo "Fix: merge infra + run terraform-release (it bootstraps infra) then rerun."
             exit 1
           fi
 
@@ -112,22 +133,13 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and push image to ECR (immutable-safe unique tag)
+      - name: Build and push image to ECR
         uses: docker/build-push-action@v6
         with:
-          context: ${{ env.BUILD_CONTEXT }}
-          file: ${{ env.DOCKERFILE_PATH }}
+          context: ${{ inputs.build_context }}
+          file: ${{ inputs.dockerfile_path }}
           push: true
           pull: true
           no-cache: true
           tags: |
-            ${{ env.IMAGE_URI }}:${{ env.RUN_TAG }}
-
-      - name: Print deploy instructions
-        run: |
-          echo "✅ Image pushed:"
-          echo "  ${{ steps.meta.outputs.image_uri }}:${{ steps.meta.outputs.deploy_tag }}"
-          echo ""
-          echo "NEXT: Run terraform-release manually with:"
-          echo "  action=deploy"
-          echo "  container_image_tag=${{ steps.meta.outputs.deploy_tag }}"
+            ${{ env.IMAGE_URI }}:${{ steps.meta.outputs.deploy_tag }}

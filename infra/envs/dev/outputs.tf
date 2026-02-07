@@ -7,3 +7,8 @@ output "ecr_repository_url" {
   description = "ECR repository URL"
   value       = module.ecr.repository_url
 }
+
+output "alb_arn" {
+  description = "ALB ARN (used for controlled teardown)"
+  value       = module.ecs.alb_arn
+}
