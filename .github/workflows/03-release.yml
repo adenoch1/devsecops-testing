@@ -31,7 +31,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ✅ Fail fast if the role is missing in this scope
+      # ✅ Fail fast if the role is missing in this scope..
       - name: Validate required secrets are present
         shell: bash
         run: |
