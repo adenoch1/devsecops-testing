@@ -13,20 +13,20 @@ on:
           - destroy
 
       container_image_tag:
-        description: "Container tag to deploy (run-... / sha-...). Leave empty to use commit SHA."
+        description: "Container tag to deploy (leave empty to use commit SHA)"
         required: false
         default: ""
-
-      smoke_path:
-        description: "Path to test (example: /health or /)"
-        required: true
-        default: "/health"
-        type: string
 
       fqdn:
-        description: "Optional: test your domain (example: app.clevernews.org). Leave blank to test ALB DNS directly."
+        description: "Your custom domain to test (example: app.clevernews.org)"
         required: false
-        default: ""
+        default: "app.clevernews.org"
+
+      smoke_path:
+        description: "Path to test on the endpoint (example: /health or /)"
+        required: true
+        default: "/"
+        type: string
 
 permissions:
   id-token: write
@@ -43,6 +43,9 @@ env:
   WORKDIR: "infra/envs/dev"
 
 jobs:
+  ########################################################
+  # DEV — Gate 1: Deploy Infra (Terraform Apply)
+  ########################################################
   deploy:
     name: Deploy (dev)
     if: ${{ inputs.action == 'deploy' }}
@@ -57,6 +60,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # OIDC auth (this is where AWS access is required)
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -98,100 +102,101 @@ jobs:
         run: terraform output
 
 
+  ########################################################
+  # DNS — Gate 2: Production-style external verification
+  # No AWS credentials. Validates the real user endpoint.
+  ########################################################
   dns:
-    name: DNS Smoke Test (dns)
+    name: DNS Gate (External Smoke Test)
     needs: deploy
     if: ${{ inputs.action == 'deploy' }}
     runs-on: ubuntu-latest
     environment: dns
 
-    defaults:
-      run:
-        working-directory: ${{ env.WORKDIR }}
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN_APPLY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-          audience: sts.amazonaws.com
-
-      - name: Verify AWS identity
-        run: aws sts get-caller-identity
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Terraform init
-        run: terraform init -input=false
-
-      - name: Read ALB DNS from Terraform state (Option B)
-        id: read
+      - name: Validate inputs
         shell: bash
         run: |
           set -euo pipefail
-          echo "Reading terraform output from state..."
-          terraform output || true
-
-          ALB="$(terraform output -raw alb_dns_name | tr -d '\r\n\t ')"
-          echo "ALB from terraform state: '$ALB'"
-
-          if [ -z "$ALB" ]; then
-            echo "ERROR: terraform output -raw alb_dns_name returned empty."
+          FQDN="${{ inputs.fqdn }}"
+          if [ -z "$FQDN" ]; then
+            echo "ERROR: fqdn input is required for DNS gate (example: app.clevernews.org)."
             exit 1
           fi
+          echo "FQDN set to: $FQDN"
+          echo "Smoke path: ${{ inputs.smoke_path }}"
 
-          echo "alb=$ALB" >> "$GITHUB_OUTPUT"
-
-      - name: Wait for readiness
-        run: sleep 30
-
-      - name: Smoke test (FQDN if provided, else ALB)
+      - name: DNS resolution check
         shell: bash
         run: |
           set -euo pipefail
-
-          PATH_ONLY="${{ inputs.smoke_path }}"
-          ALB="${{ steps.read.outputs.alb }}"
           FQDN="${{ inputs.fqdn }}"
 
-          if [ -n "$FQDN" ]; then
-            HOST="$FQDN"
-            echo "Testing FQDN: $HOST"
-          else
-            HOST="$ALB"
-            echo "Testing ALB: $HOST"
+          echo "Checking DNS resolution for: $FQDN"
+          for i in {1..12}; do
+            echo "Attempt $i..."
+            # Try A/AAAA records (common) — some setups may not show CNAME directly.
+            A="$(dig +short A "$FQDN" || true)"
+            AAAA="$(dig +short AAAA "$FQDN" || true)"
+            CNAME="$(dig +short CNAME "$FQDN" || true)"
+
+            echo "A records:"
+            echo "${A:-<none>}"
+            echo "AAAA records:"
+            echo "${AAAA:-<none>}"
+            echo "CNAME records:"
+            echo "${CNAME:-<none>}"
+
+            if [ -n "$A" ] || [ -n "$AAAA" ] || [ -n "$CNAME" ]; then
+              echo "DNS resolves ✅"
+              exit 0
+            fi
+
+            echo "DNS not resolved yet. Sleeping 15s..."
+            sleep 15
+          done
+
+          echo "ERROR: DNS did not resolve within retry window."
+          exit 1
+
+      - name: HTTPS smoke test (production truth)
+        shell: bash
+        run: |
+          set -euo pipefail
+          FQDN="${{ inputs.fqdn }}"
+          PATH_ONLY="${{ inputs.smoke_path }}"
+
+          # Make sure path begins with /
+          if [[ "$PATH_ONLY" != /* ]]; then
+            PATH_ONLY="/$PATH_ONLY"
           fi
 
-          HTTPS_URL="https://${HOST}${PATH_ONLY}"
-          HTTP_URL="http://${HOST}${PATH_ONLY}"
+          URL="https://${FQDN}${PATH_ONLY}"
+          echo "Testing URL: $URL"
 
-          echo "Testing HTTPS: $HTTPS_URL"
-          code=$(curl -k -s -o /dev/null -w "%{http_code}" "$HTTPS_URL" || true)
-          echo "HTTPS status: $code"
-          if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; then
-            echo "Smoke test passed on HTTPS."
-            exit 0
-          fi
+          # Retry window: ~3 minutes total (10 * 18s)
+          for i in {1..10}; do
+            echo "Attempt $i..."
+            code="$(curl -k -s -o /dev/null -w "%{http_code}" "$URL" || true)"
+            echo "HTTP status: $code"
 
-          echo "Testing HTTP: $HTTP_URL"
-          code=$(curl -s -o /dev/null -w "%{http_code}" "$HTTP_URL" || true)
-          echo "HTTP status: $code"
-          if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; then
-            echo "Smoke test passed on HTTP."
-            exit 0
-          fi
+            # Accept common “service is up” responses:
+            # 200 OK (healthy), 301/302 redirect (still serving)
+            if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; then
+              echo "DNS gate passed ✅"
+              exit 0
+            fi
 
-          echo "Smoke test failed."
+            sleep 18
+          done
+
+          echo "ERROR: DNS gate failed. Endpoint not healthy/reachable."
           exit 1
 
 
+  ########################################################
+  # DESTROY — Gate 3: Terraform Destroy
+  ########################################################
   destroy:
     name: Destroy (destroy)
     if: ${{ inputs.action == 'destroy' }}
@@ -206,6 +211,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # OIDC auth needed for destroy
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
