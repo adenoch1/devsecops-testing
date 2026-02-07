@@ -230,9 +230,9 @@ jobs:
         run: terraform destroy -auto-approve
 
 
-  ########################################################
+  ######################################################
   # DESTROY — Standalone run (when action=destroy)
-  ########################################################
+  ######################################################
   destroy_only:
     name: Destroy (standalone)
     if: ${{ inputs.action == 'destroy' }}
