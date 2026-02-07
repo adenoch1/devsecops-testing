@@ -95,6 +95,7 @@ resource "aws_lb" "this" {
 
   enable_deletion_protection = true
 
+
   access_logs {
     bucket  = var.alb_log_bucket_name
     prefix  = var.alb_log_prefix

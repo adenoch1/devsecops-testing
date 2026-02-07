@@ -8,6 +8,7 @@ locals {
 
 # -------------------------------------------------------------
 # KMS CMK for ALB Logs bucket encryption (S3)
+# IMPORTANT: allow S3/ELB log delivery to use the key (SSE-KMS)
 # -------------------------------------------------------------
 resource "aws_kms_key" "alb_logs" {
   description             = "CMK for ALB logs buckets (${var.name_prefix})"
@@ -23,6 +24,27 @@ resource "aws_kms_key" "alb_logs" {
         Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
         Action    = "kms:*"
         Resource  = "*"
+      },
+
+      # Allow S3 to use the CMK for objects in these buckets (SSE-KMS)
+      {
+        Sid       = "AllowS3UseOfTheKey"
+        Effect    = "Allow"
+        Principal = { Service = "s3.amazonaws.com" }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "kms:CallerAccount" = data.aws_caller_identity.current.account_id
+            "kms:ViaService"    = "s3.${data.aws_region.current.id}.amazonaws.com"
+          }
+        }
       }
     ]
   })
@@ -36,7 +58,7 @@ resource "aws_kms_alias" "alb_logs" {
 }
 
 # ------------------------------------------------------------
-# Access-logs bucket (S3 server access logs for the ALB logs bucket)
+# Access-logs bucket (target for S3 server access logs)
 # ------------------------------------------------------------
 resource "aws_s3_bucket" "alb_logs_access" {
   bucket        = local.log_access_bucket_name
@@ -169,24 +191,38 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
   }
 }
 
+# ✅ Correct: ALB logs bucket writes its SERVER ACCESS LOGS into access bucket
 resource "aws_s3_bucket_logging" "alb_logs" {
   bucket        = aws_s3_bucket.alb_logs.id
   target_bucket = aws_s3_bucket.alb_logs_access.id
   target_prefix = "s3-access/${var.name_prefix}/"
 }
 
-resource "aws_s3_bucket_logging" "alb_logs_access" {
-  bucket        = aws_s3_bucket.alb_logs_access.id
-  target_bucket = aws_s3_bucket.alb_logs.id
-  target_prefix = "s3-access/${var.name_prefix}/"
-}
+# ------------------------------------------------------------
+# Bucket policies
+#   1) ALB log delivery -> alb_logs bucket
+#   2) S3 server access logs delivery -> alb_logs_access bucket
+# ------------------------------------------------------------
 
-# ------------------------------------------------------------
-# Bucket policy: allow ALB delivery + allow S3 server access logs delivery
-# ------------------------------------------------------------
+# ✅ ALB access logging policy (this fixes your Access Denied)
 data "aws_iam_policy_document" "alb_logs_bucket_policy" {
   statement {
-    sid    = "AllowALBLogDelivery"
+    sid    = "AllowELBLogDeliveryAclCheck"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
+    }
+
+    actions = ["s3:GetBucketAcl"]
+    resources = [
+      aws_s3_bucket.alb_logs.arn
+    ]
+  }
+
+  statement {
+    sid    = "AllowELBLogDeliveryWrite"
     effect = "Allow"
 
     principals {
@@ -195,27 +231,19 @@ data "aws_iam_policy_document" "alb_logs_bucket_policy" {
     }
 
     actions = ["s3:PutObject"]
-
     resources = [
-      "arn:aws:s3:::${aws_s3_bucket.alb_logs.id}/${var.alb_log_prefix}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
+      # ALB will write to: <prefix>/AWSLogs/<account-id>/...
+      "${aws_s3_bucket.alb_logs.arn}/${var.alb_log_prefix}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
     ]
-  }
 
-  statement {
-    sid    = "AllowS3ServerAccessLogsDelivery"
-    effect = "Allow"
-
-    principals {
-      type        = "Service"
-      identifiers = ["logging.s3.amazonaws.com"]
+    # Required by ELB log delivery
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-acl"
+      values   = ["bucket-owner-full-control"]
     }
 
-    actions = ["s3:PutObject"]
-
-    resources = [
-      "arn:aws:s3:::${aws_s3_bucket.alb_logs.id}/s3-access/${var.name_prefix}/*"
-    ]
-
+    # Recommended safety
     condition {
       test     = "StringEquals"
       variable = "aws:SourceAccount"
@@ -227,6 +255,57 @@ data "aws_iam_policy_document" "alb_logs_bucket_policy" {
 resource "aws_s3_bucket_policy" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
   policy = data.aws_iam_policy_document.alb_logs_bucket_policy.json
+}
+
+# ✅ S3 server access logs delivery policy MUST be on the TARGET bucket (alb_logs_access)
+data "aws_iam_policy_document" "alb_logs_access_bucket_policy" {
+  statement {
+    sid    = "AllowS3ServerAccessLogsAclCheck"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["logging.s3.amazonaws.com"]
+    }
+
+    actions = ["s3:GetBucketAcl"]
+    resources = [
+      aws_s3_bucket.alb_logs_access.arn
+    ]
+  }
+
+  statement {
+    sid    = "AllowS3ServerAccessLogsWrite"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["logging.s3.amazonaws.com"]
+    }
+
+    actions = ["s3:PutObject"]
+    resources = [
+      "${aws_s3_bucket.alb_logs_access.arn}/s3-access/${var.name_prefix}/*"
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    # S3 access logs typically require this ACL
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-acl"
+      values   = ["bucket-owner-full-control"]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "alb_logs_access" {
+  bucket = aws_s3_bucket.alb_logs_access.id
+  policy = data.aws_iam_policy_document.alb_logs_access_bucket_policy.json
 }
 
 # -----------------------------------------------------------
@@ -280,7 +359,6 @@ resource "aws_kms_key" "sqs_sse" {
         }
       },
 
-      # ✅ REQUIRED FIX — THIS WAS MISSING
       {
         Sid    = "AllowS3ToUseKeyViaSQS"
         Effect = "Allow"
@@ -306,7 +384,6 @@ resource "aws_kms_key" "sqs_sse" {
   })
 }
 
-
 resource "aws_kms_alias" "sqs_sse" {
   name          = "alias/${var.name_prefix}-sqs-cmk"
   target_key_id = aws_kms_key.sqs_sse.key_id
@@ -324,7 +401,6 @@ resource "aws_sqs_queue" "alb_logs_events" {
   })
 }
 
-# ✅ Queue policy (expanded to include GetQueueAttributes for S3 validation)
 data "aws_iam_policy_document" "alb_logs_events_queue_policy" {
   statement {
     sid    = "AllowS3UseQueueFromAlbLogsBucket"
@@ -390,7 +466,6 @@ resource "aws_sqs_queue_policy" "alb_logs_events" {
   policy    = data.aws_iam_policy_document.alb_logs_events_queue_policy.json
 }
 
-# ✅ Stronger propagation delay for CI/CD consistency
 resource "time_sleep" "wait_for_sqs_policy" {
   create_duration = "120s"
   depends_on = [
@@ -400,9 +475,6 @@ resource "time_sleep" "wait_for_sqs_policy" {
   ]
 }
 
-# ------------------------------------------------------------
-# S3 bucket notifications -> SQS
-# ------------------------------------------------------------
 resource "aws_s3_bucket_notification" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
 
