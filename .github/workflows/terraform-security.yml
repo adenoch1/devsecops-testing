@@ -108,12 +108,12 @@ EOF
 
       # -----------------------------
       # Checkov (fail PR if policy fails)
-      # Scan infra + modules so module changes are caught
+      # IMPORTANT: scan repo root so modules are included
       # -----------------------------
       - name: checkov (IaC policy scan)
         uses: bridgecrewio/checkov-action@v12
         with:
-          directory: .
+          directory: ../..
           framework: terraform
           quiet: true
           soft_fail: false
