@@ -12,12 +12,6 @@ on:
           - deploy
           - destroy
 
-      run_destroy_after_deploy:
-        description: "If true, runs the destroy gate after DNS gate (cleanup)"
-        required: true
-        default: false
-        type: boolean
-
       container_image_tag:
         description: "Container tag to deploy (leave empty to use commit SHA)"
         required: false
@@ -66,6 +60,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # OIDC auth (AWS access required here)
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -194,12 +189,13 @@ jobs:
 
 
   ########################################################
-  # DESTROY — Gate 3 (optional cleanup after deploy+dns)
+  # DESTROY — Gate 3: Always activates after DNS on deploy,
+  # but requires approval via the "destroy" Environment.
   ########################################################
   destroy_after_deploy:
     name: Destroy (after deploy)
     needs: dns
-    if: ${{ inputs.action == 'deploy' && inputs.run_destroy_after_deploy == true }}
+    if: ${{ inputs.action == 'deploy' }}
     runs-on: ubuntu-latest
     environment: destroy
 
@@ -211,6 +207,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # OIDC auth needed for destroy
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
