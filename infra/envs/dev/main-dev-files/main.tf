@@ -76,4 +76,5 @@ module "ecs" {
   alb_log_prefix              = var.alb_log_prefix
   cloudwatch_logs_kms_key_arn = module.logging.cloudwatch_logs_kms_key_arn
   log_retention_days          = var.log_retention_days
+  alb_deletion_protection     = false
 }
