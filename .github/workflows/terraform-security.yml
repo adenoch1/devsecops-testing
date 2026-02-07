@@ -61,30 +61,30 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           if [ -f terraform.tfvars ]; then
             echo "Found terraform.tfvars in $(pwd)"
             ls -la terraform.tfvars
           else
             echo "terraform.tfvars not found in $(pwd). Creating .ci.auto.tfvars for CI scans/plan..."
-            cat > .ci.auto.tfvars <<'EOF'
-aws_region  = "ca-central-1"
-project     = "devsecops-testing"
-environment = "dev"
-owner       = "enoch"
+            {
+              echo 'aws_region  = "ca-central-1"'
+              echo 'project     = "devsecops-testing"'
+              echo 'environment = "dev"'
+              echo 'owner       = "enoch"'
+              echo ''
+              echo 'vpc_cidr = "192.168.0.0/16"'
+              echo ''
+              echo 'acm_certificate_arn = "arn:aws:acm:ca-central-1:000000000000:certificate/00000000-0000-0000-0000-000000000000"'
+              echo ''
+              echo 'alb_log_prefix          = "alb-access"'
+              echo 'flow_log_retention_days = 30'
+              echo 'ecs_log_retention_days  = 14'
+              echo ''
+              echo 'health_check_path = "/health"'
+            } > .ci.auto.tfvars
 
-vpc_cidr = "192.168.0.0/16"
-
-# placeholder cert ARN (plan-only)
-acm_certificate_arn = "arn:aws:acm:ca-central-1:000000000000:certificate/00000000-0000-0000-0000-000000000000"
-
-# logging defaults
-alb_log_prefix          = "alb-access"
-flow_log_retention_days = 30
-ecs_log_retention_days  = 14
-
-# health endpoint
-health_check_path = "/health"
-EOF
+            echo "Created .ci.auto.tfvars:"
             ls -la .ci.auto.tfvars
           fi
 
@@ -92,7 +92,9 @@ EOF
       # tfsec (robust): install + run
       # -----------------------------
       - name: Install tfsec
+        shell: bash
         run: |
+          set -euo pipefail
           curl -sSL https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
           tfsec --version
 
@@ -136,7 +138,9 @@ EOF
         run: terraform show -json tfplan.binary > tfplan.json
 
       - name: Install Conftest
+        shell: bash
         run: |
+          set -euo pipefail
           wget -qO conftest.tar.gz https://github.com/open-policy-agent/conftest/releases/download/v0.50.0/conftest_0.50.0_Linux_x86_64.tar.gz
           tar -xzf conftest.tar.gz conftest
           sudo mv conftest /usr/local/bin/conftest
