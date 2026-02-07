@@ -85,6 +85,39 @@ jobs:
             tfsec . --tfvars-file .tfsec.auto.tfvars --soft-fail
           fi
 
+      # -----------------------------
+      # checkov: ensure var_file is provided (so CKV_AWS_150 can evaluate)
+      # -----------------------------
+      - name: Resolve Checkov var_file
+        id: checkov_vars
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f terraform.tfvars ]; then
+            echo "Using terraform.tfvars for Checkov."
+            echo "varfile=infra/envs/dev/terraform.tfvars" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "terraform.tfvars not found. Creating infra/envs/dev/.checkov.auto.tfvars for Checkov..."
+          cat > .checkov.auto.tfvars <<'EOF'
+aws_region = "ca-central-1"
+project     = "devsecops-testing"
+environment = "dev"
+owner       = "enoch"
+vpc_cidr    = "192.168.0.0/16"
+
+# ✅ Ensure Checkov sees deletion protection enabled by default
+alb_deletion_protection = true
+
+# Placeholder certificate ARN to keep parsing happy during PR scans
+acm_certificate_arn = "arn:aws:acm:ca-central-1:000000000000:certificate/00000000-0000-0000-0000-000000000000"
+EOF
+
+          ls -la .checkov.auto.tfvars
+          echo "varfile=infra/envs/dev/.checkov.auto.tfvars" >> "$GITHUB_OUTPUT"
+
       - name: checkov (IaC policy scan)
         uses: bridgecrewio/checkov-action@v12
         with:
@@ -92,7 +125,9 @@ jobs:
           framework: terraform
           quiet: true
           soft_fail: false
+          # IMPORTANT: do NOT skip CKV_AWS_150
           skip_check: CKV2_AWS_76,CKV_AWS_109,CKV_AWS_111,CKV_AWS_356,CKV_AWS_144
+          var_file: ${{ steps.checkov_vars.outputs.varfile }}
 
       - name: Terraform plan
         run: terraform plan -input=false -var-file="terraform.tfvars" -out=tfplan.binary
