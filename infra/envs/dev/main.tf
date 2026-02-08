@@ -19,7 +19,7 @@ module "logging" {
     aws.replica = aws.replica
   }
 
-  # ✅ FIX: pass the region required by the module
+  # ✅ FIX: pass the region required by the module.
   aws_region = var.aws_region
 
   alb_log_prefix = var.alb_log_prefix
