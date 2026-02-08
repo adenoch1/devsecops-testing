@@ -128,6 +128,8 @@ resource "aws_kms_alias" "sns_topic" {
 # ------------------------------------------------------------
 # Audit bucket (server access logs for the access-logs bucket)
 # ------------------------------------------------------------
+#tfsec:ignore:aws-s3-enable-bucket-logging
+# Terminal audit bucket: end of access-logging chain (cannot log indefinitely without creating infinite buckets).
 resource "aws_s3_bucket" "alb_logs_audit" {
   bucket        = local.log_audit_bucket_name
   force_destroy = true
