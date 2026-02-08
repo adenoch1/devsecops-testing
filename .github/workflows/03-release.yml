@@ -81,7 +81,7 @@ jobs:
 
           TFVARS="${{ inputs.tfvars_path }}"
           if [ ! -f "$TFVARS" ]; then
-            echo "ERROR:: tfvars not found at: $TFVARS"
+            echo "ERROR: tfvars not found at: $TFVARS"
             exit 1
           fi
 
