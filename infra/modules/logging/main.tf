@@ -9,6 +9,9 @@ locals {
   log_access_bucket_name       = "${var.name_prefix}-alb-logs-access-${local.account_id}"
   log_audit_bucket_name        = "${var.name_prefix}-alb-audit-logs-${local.account_id}"
   log_audit_access_bucket_name = "${var.name_prefix}-alb-audit-logs-access-${local.account_id}"
+
+  # Dedicated bucket to store access logs for the access-log buckets themselves
+  access_audit_bucket_name = "${var.name_prefix}-alb-access-audit-${local.account_id}"
 }
 
 # ------------------------------------------------------------
@@ -98,6 +101,68 @@ resource "aws_kms_alias" "cloudwatch_logs" {
 }
 
 # ------------------------------------------------------------
+# Access-Audit Bucket (stores logs for the access-log buckets)
+# ------------------------------------------------------------
+resource "aws_s3_bucket" "access_audit" {
+  bucket        = local.access_audit_bucket_name
+  force_destroy = true
+
+  tags = merge(var.tags, { Name = local.access_audit_bucket_name })
+}
+
+resource "aws_s3_bucket_public_access_block" "access_audit" {
+  bucket                  = aws_s3_bucket.access_audit.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_versioning" "access_audit" {
+  bucket = aws_s3_bucket.access_audit.id
+  versioning_configuration { status = "Enabled" }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "access_audit" {
+  bucket = aws_s3_bucket.access_audit.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.alb_logs.arn
+    }
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "access_audit" {
+  bucket = aws_s3_bucket.access_audit.id
+
+  rule {
+    id     = "lifecycle"
+    status = "Enabled"
+
+    filter { prefix = "" }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    expiration {
+      days = var.lifecycle_expire_days
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.lifecycle_expire_days
+    }
+
+    transition {
+      days          = var.lifecycle_glacier_days
+      storage_class = "GLACIER"
+    }
+  }
+}
+
+# ------------------------------------------------------------
 # Access logs bucket (server access logs for the main ALB logs bucket)
 # ------------------------------------------------------------
 resource "aws_s3_bucket" "alb_logs_access" {
@@ -157,6 +222,13 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
       storage_class = "GLACIER"
     }
   }
+}
+
+# ✅ tfsec fix: enable logging for the access-log bucket itself
+resource "aws_s3_bucket_logging" "alb_logs_access" {
+  bucket        = aws_s3_bucket.alb_logs_access.id
+  target_bucket = aws_s3_bucket.access_audit.id
+  target_prefix = "${var.alb_log_prefix}/access-bucket/"
 }
 
 # ------------------------------------------------------------
@@ -228,7 +300,7 @@ resource "aws_s3_bucket_logging" "alb_logs" {
 }
 
 # ------------------------------------------------------------
-# Audit logs bucket (optional separate bucket)
+# Audit logs bucket
 # ------------------------------------------------------------
 resource "aws_s3_bucket" "alb_logs_audit" {
   bucket        = local.log_audit_bucket_name
@@ -351,6 +423,13 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_audit_access" {
   }
 }
 
+# ✅ tfsec fix: enable logging for the audit access-log bucket itself
+resource "aws_s3_bucket_logging" "alb_logs_audit_access" {
+  bucket        = aws_s3_bucket.alb_logs_audit_access.id
+  target_bucket = aws_s3_bucket.access_audit.id
+  target_prefix = "${var.alb_log_prefix}/audit-access-bucket/"
+}
+
 resource "aws_s3_bucket_logging" "alb_logs_audit" {
   bucket        = aws_s3_bucket.alb_logs_audit.id
   target_bucket = aws_s3_bucket.alb_logs_audit_access.id
@@ -393,7 +472,8 @@ data "aws_iam_policy_document" "s3_events_topic_policy" {
         aws_s3_bucket.alb_logs.arn,
         aws_s3_bucket.alb_logs_access.arn,
         aws_s3_bucket.alb_logs_audit.arn,
-        aws_s3_bucket.alb_logs_audit_access.arn
+        aws_s3_bucket.alb_logs_audit_access.arn,
+        aws_s3_bucket.access_audit.arn
       ]
     }
   }
@@ -439,6 +519,17 @@ resource "aws_s3_bucket_notification" "alb_logs_audit" {
 
 resource "aws_s3_bucket_notification" "alb_logs_audit_access" {
   bucket = aws_s3_bucket.alb_logs_audit_access.id
+
+  topic {
+    topic_arn = aws_sns_topic.s3_events.arn
+    events    = ["s3:ObjectCreated:*"]
+  }
+
+  depends_on = [aws_sns_topic_policy.s3_events]
+}
+
+resource "aws_s3_bucket_notification" "access_audit" {
+  bucket = aws_s3_bucket.access_audit.id
 
   topic {
     topic_arn = aws_sns_topic.s3_events.arn
