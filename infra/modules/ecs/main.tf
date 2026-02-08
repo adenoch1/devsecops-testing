@@ -14,86 +14,100 @@ resource "aws_cloudwatch_log_group" "app" {
 }
 
 # -----------------------------
-# Security Groups (STRICT + NO CYCLE)
+# Security Groups (no cycle, prod-grade)
 # -----------------------------
-
+# ALB SG: ingress from Internet (443); egress to VPC CIDR on app_port (no SG reference => no cycle)
 #tfsec:ignore:aws-ec2-no-public-ingress-sgr
 resource "aws_security_group" "alb" {
   name        = "${var.name_prefix}-alb-sg"
   description = "ALB security group"
   vpc_id      = var.vpc_id
 
+  ingress {
+    description = "HTTPS from internet (IPv4)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description      = "HTTPS from internet (IPv6)"
+    from_port        = 443
+    to_port          = 443
+    protocol         = "tcp"
+    ipv6_cidr_blocks = ["::/0"]
+  }
+
+  # IMPORTANT: This breaks the cycle.
+  # We restrict egress to the VPC CIDR on the app port (tight enough for prod),
+  # instead of referencing the ECS SG directly.
+  egress {
+    description = "ALB to ECS tasks on app port (VPC CIDR)"
+    from_port   = var.app_port
+    to_port     = var.app_port
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-alb-sg"
   })
 }
 
+# ECS SG: ingress only from ALB SG; egress limited to needed destinations
 resource "aws_security_group" "ecs" {
   name        = "${var.name_prefix}-ecs-sg"
   description = "ECS tasks security group"
   vpc_id      = var.vpc_id
+
+  ingress {
+    description     = "App traffic from ALB only"
+    from_port       = var.app_port
+    to_port         = var.app_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
+  # Outbound HTTPS for AWS APIs
+  #tfsec:ignore:aws-ec2-no-public-egress-sgr
+  egress {
+    description = "Outbound HTTPS (IPv4)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # DNS to VPC resolver
+  egress {
+    description = "DNS to VPC resolver (UDP)"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "udp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  egress {
+    description = "DNS to VPC resolver (TCP)"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
 
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-ecs-sg"
   })
 }
 
-resource "aws_vpc_security_group_ingress_rule" "alb_https_ipv4" {
-  security_group_id = aws_security_group.alb.id
-  description       = "HTTPS from internet (IPv4)"
-  ip_protocol       = "tcp"
-  from_port         = 443
-  to_port           = 443
-  cidr_ipv4         = "0.0.0.0/0"
-}
-
-resource "aws_vpc_security_group_ingress_rule" "alb_https_ipv6" {
-  security_group_id = aws_security_group.alb.id
-  description       = "HTTPS from internet (IPv6)"
-  ip_protocol       = "tcp"
-  from_port         = 443
-  to_port           = 443
-  cidr_ipv6         = "::/0"
-}
-
-resource "aws_vpc_security_group_egress_rule" "alb_to_ecs_app_port" {
-  security_group_id            = aws_security_group.alb.id
-  description                  = "ALB to ECS tasks on app port only"
-  ip_protocol                  = "tcp"
-  from_port                    = var.app_port
-  to_port                      = var.app_port
-  referenced_security_group_id = aws_security_group.ecs.id
-}
-
-resource "aws_vpc_security_group_ingress_rule" "ecs_from_alb_app_port" {
-  security_group_id            = aws_security_group.ecs.id
-  description                  = "App traffic from ALB only"
-  ip_protocol                  = "tcp"
-  from_port                    = var.app_port
-  to_port                      = var.app_port
-  referenced_security_group_id = aws_security_group.alb.id
-}
-
-#tfsec:ignore:aws-ec2-no-public-egress-sgr
-resource "aws_vpc_security_group_egress_rule" "ecs_https_out_ipv4" {
-  security_group_id = aws_security_group.ecs.id
-  description       = "ECS tasks outbound HTTPS only (IPv4) via NAT"
-  ip_protocol       = "tcp"
-  from_port         = 443
-  to_port           = 443
-  cidr_ipv4         = "0.0.0.0/0"
-}
-
 # ------------------------------
 # Application Load Balancer (HTTPS enforced)
 # ------------------------------
-#checkov:skip=CKV2_AWS_76: "WAFv2 WebACL with AWS Managed Rules is attached in this module; CKV2_AWS_76 may false-positive due to graph evaluation."
 resource "aws_lb" "this" {
   name               = "${var.name_prefix}-alb"
   load_balancer_type = "application"
-
-  #tfsec:ignore:aws-elb-alb-not-public
-  internal = false
+  internal           = false
 
   security_groups            = [aws_security_group.alb.id]
   subnets                    = var.public_subnet_ids
@@ -146,104 +160,9 @@ resource "aws_lb_listener" "https" {
   }
 }
 
-# -----------------------------
-# WAFv2 (Log4j coverage + Logging)
-# -----------------------------
-resource "aws_cloudwatch_log_group" "waf" {
-  name              = "aws-waf-logs-${var.name_prefix}"
-  retention_in_days = var.log_retention_days
-  kms_key_id        = var.cloudwatch_logs_kms_key_arn
-
-  tags = merge(var.tags, {
-    Name = "${var.name_prefix}-waf-logs"
-  })
-}
-
-resource "aws_wafv2_web_acl" "this" {
-  name  = "${var.name_prefix}-waf"
-  scope = "REGIONAL"
-
-  default_action {
-    allow {}
-  }
-
-  visibility_config {
-    cloudwatch_metrics_enabled = true
-    metric_name                = "${var.name_prefix}-waf"
-    sampled_requests_enabled   = true
-  }
-
-  rule {
-    name     = "AWSManagedRulesCommonRuleSet"
-    priority = 1
-
-    override_action {
-      none {}
-    }
-
-    statement {
-      managed_rule_group_statement {
-        name        = "AWSManagedRulesCommonRuleSet"
-        vendor_name = "AWS"
-      }
-    }
-
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "CommonRuleSet"
-      sampled_requests_enabled   = true
-    }
-  }
-
-  rule {
-    name     = "AWSManagedRulesKnownBadInputsRuleSet"
-    priority = 2
-
-    override_action {
-      none {}
-    }
-
-    statement {
-      managed_rule_group_statement {
-        name        = "AWSManagedRulesKnownBadInputsRuleSet"
-        vendor_name = "AWS"
-      }
-    }
-
-    visibility_config {
-      cloudwatch_metrics_enabled = true
-      metric_name                = "KnownBadInputs"
-      sampled_requests_enabled   = true
-    }
-  }
-
-  tags = merge(var.tags, {
-    Name = "${var.name_prefix}-waf"
-  })
-}
-
-resource "aws_wafv2_web_acl_association" "alb" {
-  resource_arn = aws_lb.this.arn
-  web_acl_arn  = aws_wafv2_web_acl.this.arn
-}
-
-resource "aws_wafv2_web_acl_logging_configuration" "this" {
-  resource_arn = aws_wafv2_web_acl.this.arn
-
-  log_destination_configs = [
-    aws_cloudwatch_log_group.waf.arn
-  ]
-
-  redacted_fields {
-    single_header {
-      name = "authorization"
-    }
-  }
-}
-
-# -----------------------------
-# ECS Cluster
-# -----------------------------
+# ------------------------------------------------------------
+# ECS Cluster + Task + Service (Fargate)
+# ------------------------------------------------------------
 resource "aws_ecs_cluster" "this" {
   name = "${var.name_prefix}-cluster"
 
@@ -252,30 +171,23 @@ resource "aws_ecs_cluster" "this" {
     value = "enabled"
   }
 
-  tags = merge(var.tags, {
-    Name = "${var.name_prefix}-cluster"
-  })
+  tags = merge(var.tags, { Name = "${var.name_prefix}-cluster" })
 }
 
-# ------------------------------
-# ECS Task Definition
-# ------------------------------
-resource "aws_ecs_task_definition" "this" {
+resource "aws_ecs_task_definition" "app" {
   family                   = "${var.name_prefix}-task"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = tostring(var.task_cpu)
-  memory                   = tostring(var.task_memory)
-
-  execution_role_arn = var.ecs_task_execution_role_arn
-  task_role_arn      = var.ecs_task_role_arn
+  cpu                      = var.task_cpu
+  memory                   = var.task_memory
+  execution_role_arn       = var.ecs_task_execution_role_arn
+  task_role_arn            = var.ecs_task_role_arn
 
   container_definitions = jsonencode([
     {
       name      = "app"
       image     = "${var.ecr_repository_url}:${var.container_image_tag}"
       essential = true
-
       portMappings = [
         {
           containerPort = var.app_port
@@ -283,11 +195,6 @@ resource "aws_ecs_task_definition" "this" {
           protocol      = "tcp"
         }
       ]
-
-      environment = [
-        { name = "FLASK_ENV", value = "production" }
-      ]
-
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -296,21 +203,19 @@ resource "aws_ecs_task_definition" "this" {
           awslogs-stream-prefix = "ecs"
         }
       }
+      environment = [
+        { name = "PORT", value = tostring(var.app_port) }
+      ]
     }
   ])
 
-  tags = merge(var.tags, {
-    Name = "${var.name_prefix}-taskdef"
-  })
+  tags = merge(var.tags, { Name = "${var.name_prefix}-task" })
 }
 
-# --------------------------
-# ECS Service
-# --------------------------
-resource "aws_ecs_service" "this" {
-  name            = "${var.name_prefix}-svc"
+resource "aws_ecs_service" "app" {
+  name            = "${var.name_prefix}-service"
   cluster         = aws_ecs_cluster.this.id
-  task_definition = aws_ecs_task_definition.this.arn
+  task_definition = aws_ecs_task_definition.app.arn
   desired_count   = var.desired_count
   launch_type     = "FARGATE"
 
@@ -326,13 +231,13 @@ resource "aws_ecs_service" "this" {
     container_port   = var.app_port
   }
 
-  depends_on = [
-    aws_lb_listener.https,
-    aws_wafv2_web_acl_association.alb,
-    aws_wafv2_web_acl_logging_configuration.this
-  ]
+  deployment_minimum_healthy_percent = 50
+  deployment_maximum_percent         = 200
 
-  tags = merge(var.tags, {
-    Name = "${var.name_prefix}-service"
-  })
+  enable_ecs_managed_tags = true
+  propagate_tags          = "SERVICE"
+
+  depends_on = [aws_lb_listener.https]
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-service" })
 }
