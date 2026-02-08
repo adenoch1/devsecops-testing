@@ -69,7 +69,6 @@ resource "aws_kms_alias" "cloudwatch_logs" {
 # KMS CMK for SNS Topic encryption (required by CKV_AWS_26)
 # -------------------------------------------------------------
 data "aws_iam_policy_document" "sns_topic_kms" {
-  # Admin control for your account (root)
   statement {
     sid    = "AllowAccountAdministration"
     effect = "Allow"
@@ -83,7 +82,6 @@ data "aws_iam_policy_document" "sns_topic_kms" {
     resources = ["*"]
   }
 
-  # Allow SNS service to use this key for this account (encryption at rest)
   statement {
     sid    = "AllowSNSServiceUse"
     effect = "Allow"
@@ -399,7 +397,6 @@ resource "aws_s3_bucket_logging" "alb_logs_access" {
 # Bucket policy: allow ALB delivery
 # ------------------------------------------------------------
 data "aws_iam_policy_document" "alb_logs_bucket_policy" {
-  # ELB log delivery needs ACL check
   statement {
     sid    = "AllowELBLogDeliveryAclCheck"
     effect = "Allow"
@@ -413,7 +410,6 @@ data "aws_iam_policy_document" "alb_logs_bucket_policy" {
     resources = [aws_s3_bucket.alb_logs.arn]
   }
 
-  # ELB log delivery write with SSE-KMS + ACL requirements
   statement {
     sid    = "AllowELBLogDeliveryWrite"
     effect = "Allow"
@@ -549,12 +545,15 @@ data "aws_iam_policy_document" "sns_allow_s3_publish" {
       values   = [data.aws_caller_identity.current.account_id]
     }
 
+    # ### FIX CKV2_AWS_62:
+    # Include ALL buckets that publish notifications to this topic
     condition {
       test     = "ArnLike"
       variable = "aws:SourceArn"
       values = [
         aws_s3_bucket.alb_logs.arn,
-        aws_s3_bucket.alb_logs_access.arn
+        aws_s3_bucket.alb_logs_access.arn,
+        aws_s3_bucket.alb_logs_audit.arn
       ]
     }
   }
@@ -578,6 +577,19 @@ resource "aws_s3_bucket_notification" "alb_logs" {
 
 resource "aws_s3_bucket_notification" "alb_logs_access" {
   bucket = aws_s3_bucket.alb_logs_access.id
+
+  topic {
+    topic_arn = aws_sns_topic.s3_log_events.arn
+    events    = ["s3:ObjectCreated:*"]
+  }
+
+  depends_on = [aws_sns_topic_policy.s3_log_events]
+}
+
+# ### FIX CKV2_AWS_62:
+# Audit bucket must also have event notifications enabled.
+resource "aws_s3_bucket_notification" "alb_logs_audit" {
+  bucket = aws_s3_bucket.alb_logs_audit.id
 
   topic {
     topic_arn = aws_sns_topic.s3_log_events.arn
