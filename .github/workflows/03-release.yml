@@ -121,7 +121,7 @@ jobs:
           if aws ecr describe-repositories --repository-names "${REPO_NAME}" >/dev/null 2>&1; then
             echo "ECR repo exists: ${REPO_NAME}"
           else
-            echo "ERROR: ECR repo ${REPO_NAME} does not exist"
+            echo "ERROR:: ECR repo ${REPO_NAME} does not exist"
             echo "This must be created by Terraform first."
             echo "Fix: merge infra + run terraform-release (it bootstraps infra) then rerun."
             exit 1
