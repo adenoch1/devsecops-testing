@@ -89,7 +89,7 @@ jobs:
           ENVIRONMENT=$(grep -E '^\s*environment\s*=' "$TFVARS" | head -n1 | awk -F\" '{print $2}')
 
           if [ -z "$PROJECT" ] || [ -z "$ENVIRONMENT" ]; then
-            echo "ERROR: Could not read project/environment from $TFVARS"
+            echo "ERROR:: Could not read project/environment from $TFVARS"
             exit 1
           fi
 
