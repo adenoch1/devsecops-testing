@@ -13,6 +13,11 @@ variable "vpc_id" {
   description = "VPC ID"
 }
 
+variable "vpc_cidr" {
+  type        = string
+  description = "VPC CIDR block (used to restrict DNS egress)"
+}
+
 variable "public_subnet_ids" {
   type        = list(string)
   description = "Public subnet IDs (ALB here)"
@@ -94,5 +99,3 @@ variable "log_retention_days" {
   description = "Retention (days) for ECS CloudWatch logs"
   default     = 14
 }
-
-
