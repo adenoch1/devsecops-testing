@@ -30,3 +30,10 @@ variable "tags" {
     ManagedBy = "Terraform"
   }
 }
+
+variable "replication_region" {
+  description = "Replica region for provider alias aws.replica (used for replication-capable modules)"
+  type        = string
+  default     = "us-east-1"
+}
+
