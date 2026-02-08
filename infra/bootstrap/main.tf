@@ -222,7 +222,7 @@ resource "aws_dynamodb_table" "tflocks" {
 # -----------------------------
 resource "aws_s3_bucket" "tfstate" {
   bucket        = "${var.name_prefix}-tfstate-${data.aws_caller_identity.current.account_id}"
-  force_destroy = true
+  force_destroy = false
 
   tags = merge(var.tags, { Name = "${var.name_prefix}-tfstate" })
 }
@@ -279,95 +279,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "tfstate" {
 # -----------------------------
 resource "aws_s3_bucket" "tfstate_access_logs" {
   bucket        = "${var.name_prefix}-tfstate-access-${data.aws_caller_identity.current.account_id}"
-  force_destroy = true
-
-  tags = merge(var.tags, { Name = "${var.name_prefix}-tfstate-access" })
-}
-
-resource "aws_s3_bucket_public_access_block" "tfstate_access_logs" {
-  bucket                  = aws_s3_bucket.tfstate_access_logs.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_versioning" "tfstate_access_logs" {
-  bucket = aws_s3_bucket.tfstate_access_logs.id
-  versioning_configuration { status = "Enabled" }
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "tfstate_access_logs" {
-  bucket = aws_s3_bucket.tfstate_access_logs.id
-
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm     = "aws:kms"
-      kms_master_key_id = aws_kms_key.tfstate_logs.arn
-    }
-  }
-}
-
-resource "aws_s3_bucket_lifecycle_configuration" "tfstate_access_logs" {
-  bucket = aws_s3_bucket.tfstate_access_logs.id
-
-  rule {
-    id     = "lifecycle"
-    status = "Enabled"
-
-    filter { prefix = "" }
-
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
-    }
-
-    expiration {
-      days = 365
-    }
-
-    noncurrent_version_expiration {
-      noncurrent_days = 365
-    }
-  }
-}
-
-data "aws_iam_policy_document" "tfstate_access_logs_bucket_policy" {
-  statement {
-    sid    = "AllowS3ServerAccessLogsAclCheck"
-    effect = "Allow"
-
-    principals {
-      type        = "Service"
-      identifiers = ["logging.s3.amazonaws.com"]
-    }
-
-    actions   = ["s3:GetBucketAcl"]
-    resources = [aws_s3_bucket.tfstate_access_logs.arn]
-  }
-
-  statement {
-    sid    = "AllowS3ServerAccessLogsWrite"
-    effect = "Allow"
-
-    principals {
-      type        = "Service"
-      identifiers = ["logging.s3.amazonaws.com"]
-    }
-
-    actions   = ["s3:PutObject"]
-    resources = ["${aws_s3_bucket.tfstate_access_logs.arn}/*"]
-
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [data.aws_caller_identity.current.account_id]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "s3:x-amz-acl"
-      values   = ["bucket-owner-full-control"]
-    }
 
     condition {
       test     = "StringEquals"
@@ -381,11 +292,6 @@ data "aws_iam_policy_document" "tfstate_access_logs_bucket_policy" {
       values   = [aws_kms_key.tfstate_logs.arn]
     }
   }
-}
-
-resource "aws_s3_bucket_policy" "tfstate_access_logs" {
-  bucket = aws_s3_bucket.tfstate_access_logs.id
-  policy = data.aws_iam_policy_document.tfstate_access_logs_bucket_policy.json
 }
 
 resource "aws_s3_bucket_logging" "tfstate" {
