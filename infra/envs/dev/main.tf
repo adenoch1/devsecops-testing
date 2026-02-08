@@ -1,12 +1,14 @@
-locals {
-  tags = {
-    Project     = var.project
-    Environment = var.environment
-    Owner       = var.owner
-    ManagedBy   = "Terraform"
-  }
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
 
-  name_prefix = "${var.project}-${var.environment}"
+output "account_id" {
+  value       = data.aws_caller_identity.current.account_id
+  description = "AWS account ID (sanity check for CI/OIDC)"
+}
+
+output "region" {
+  value       = data.aws_region.current.name
+  description = "AWS region (sanity check for CI/OIDC)"
 }
 
 module "logging" {
@@ -19,7 +21,7 @@ module "logging" {
     aws.replica = aws.replica
   }
 
-  # ✅ FIX: pass the region required by the module.
+  # Required by modules/logging
   aws_region = var.aws_region
 
   alb_log_prefix = var.alb_log_prefix
@@ -30,8 +32,6 @@ module "logging" {
   replication_enabled = var.replication_enabled
   replication_region  = var.replication_region
 }
-
-
 
 module "network" {
   source      = "../../modules/network"
