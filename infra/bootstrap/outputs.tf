@@ -12,3 +12,8 @@ output "tfstate_kms_key_arn" {
   value       = aws_kms_key.tfstate.arn
   description = "KMS key ARN used to encrypt tfstate"
 }
+
+output "tflocks_kms_key_arn" {
+  value       = aws_kms_key.tflocks.arn
+  description = "KMS key ARN used to encrypt DynamoDB locks"
+}

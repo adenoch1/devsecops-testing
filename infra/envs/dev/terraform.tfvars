@@ -14,4 +14,4 @@ acm_certificate_arn = "arn:aws:acm:ca-central-1:476532114555:certificate/8729f39
 alb_log_prefix          = "alb-access"
 log_retention_days      = 365
 flow_log_retention_days = 365
-health_check_path = "/health"
+health_check_path       = "/health"

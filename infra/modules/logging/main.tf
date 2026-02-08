@@ -34,8 +34,8 @@ data "aws_iam_policy_document" "alb_logs_kms_policy" {
 
   # Allow S3 to use the key for bucket encryption/decryption (SSE-KMS)
   statement {
-    sid     = "AllowS3UseOfTheKey"
-    effect  = "Allow"
+    sid    = "AllowS3UseOfTheKey"
+    effect = "Allow"
     actions = [
       "kms:Encrypt",
       "kms:Decrypt",
@@ -340,7 +340,8 @@ resource "aws_s3_bucket_policy" "alb_logs_access" {
 # ✅ CKV2_AWS_62: Event notifications enabled (SNS)
 # ------------------------------------------------------------
 resource "aws_sns_topic" "s3_log_events" {
-  name = "${var.name_prefix}-s3-log-events"
+  name              = "${var.name_prefix}-s3-log-events"
+  kms_master_key_id = aws_kms_key.sns_topic.arn
 
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-s3-log-events"
@@ -449,4 +450,62 @@ resource "aws_kms_key" "cloudwatch_logs" {
 resource "aws_kms_alias" "cloudwatch_logs" {
   name          = "alias/${var.name_prefix}-cloudwatch-logs"
   target_key_id = aws_kms_key.cloudwatch_logs.key_id
+}
+
+data "aws_iam_policy_document" "sns_topic_kms" {
+  # Admin control for your account (root)
+  statement {
+    sid    = "AllowAccountAdministration"
+    effect = "Allow"
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+
+    actions   = ["kms:*"]
+    resources = ["*"]
+  }
+
+  # Allow SNS service to use this key for this account (encryption at rest)
+  statement {
+    sid    = "AllowSNSServiceUse"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["sns.amazonaws.com"]
+    }
+
+    actions = [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:DescribeKey"
+    ]
+
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+}
+
+resource "aws_kms_key" "sns_topic" {
+  description         = "KMS key for encrypting SNS topics in ${var.name_prefix}"
+  enable_key_rotation = true
+  policy              = data.aws_iam_policy_document.sns_topic_kms.json
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-sns-kms"
+  })
+}
+
+resource "aws_kms_alias" "sns_topic" {
+  name          = "alias/${var.name_prefix}-sns"
+  target_key_id = aws_kms_key.sns_topic.key_id
 }
