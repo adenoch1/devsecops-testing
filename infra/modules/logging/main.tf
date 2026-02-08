@@ -18,6 +18,47 @@ locals {
 }
 
 # ------------------------------------------------------------
+# ALB access log delivery policy (required for ALB access_logs)
+# ------------------------------------------------------------
+locals {
+  # ALB writes keys like: <prefix>/AWSLogs/<account-id>/elasticloadbalancing/<region>/...
+  alb_log_key_prefix = var.alb_log_prefix != "" ? "${var.alb_log_prefix}/AWSLogs/${local.account_id}/*" : "AWSLogs/${local.account_id}/*"
+}
+
+data "aws_iam_policy_document" "alb_logs_bucket_policy" {
+  statement {
+    sid     = "AWSLogDeliveryAclCheck"
+    effect  = "Allow"
+    actions = ["s3:GetBucketAcl", "s3:ListBucket"]
+    resources = [
+      aws_s3_bucket.alb_logs.arn
+    ]
+    principals {
+      type        = "Service"
+      identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
+    }
+  }
+
+  statement {
+    sid     = "AWSLogDeliveryWrite"
+    effect  = "Allow"
+    actions = ["s3:PutObject"]
+    resources = [
+      "${aws_s3_bucket.alb_logs.arn}/${local.alb_log_key_prefix}"
+    ]
+    principals {
+      type        = "Service"
+      identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-acl"
+      values   = ["bucket-owner-full-control"]
+    }
+  }
+}
+
+# ------------------------------------------------------------
 # KMS keys (for ALB logs and CloudWatch Logs)
 # ------------------------------------------------------------
 resource "aws_kms_key" "alb_logs" {
@@ -75,7 +116,7 @@ resource "aws_kms_key" "cloudwatch_logs" {
         Resource  = "*"
       },
       {
-        Sid       = "AllowCloudWatchLogsUseOfKey"
+        Sid       = "AllowCloudWatchLogs"
         Effect    = "Allow"
         Principal = { Service = "logs.${local.region}.amazonaws.com" }
         Action = [
@@ -86,11 +127,6 @@ resource "aws_kms_key" "cloudwatch_logs" {
           "kms:DescribeKey"
         ]
         Resource = "*"
-        Condition = {
-          StringEquals = {
-            "aws:SourceAccount" = local.account_id
-          }
-        }
       }
     ]
   })
@@ -104,7 +140,7 @@ resource "aws_kms_alias" "cloudwatch_logs" {
 }
 
 # ------------------------------------------------------------
-# Final sink bucket (stores access logs for access_audit bucket)
+# Access audit sink bucket (final sink)
 # ------------------------------------------------------------
 resource "aws_s3_bucket" "access_audit_sink" {
   bucket        = local.access_audit_sink_bucket_name
@@ -137,36 +173,8 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "access_audit_sink
   }
 }
 
-resource "aws_s3_bucket_lifecycle_configuration" "access_audit_sink" {
-  bucket = aws_s3_bucket.access_audit_sink.id
-
-  rule {
-    id     = "lifecycle"
-    status = "Enabled"
-
-    filter { prefix = "" }
-
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
-    }
-
-    expiration {
-      days = var.lifecycle_expire_days
-    }
-
-    noncurrent_version_expiration {
-      noncurrent_days = var.lifecycle_expire_days
-    }
-
-    transition {
-      days          = var.lifecycle_glacier_days
-      storage_class = "GLACIER"
-    }
-  }
-}
-
 # ------------------------------------------------------------
-# Access-Audit bucket (stores logs for the access-log buckets)
+# Access audit bucket (logs the access-log buckets)
 # ------------------------------------------------------------
 resource "aws_s3_bucket" "access_audit" {
   bucket        = local.access_audit_bucket_name
@@ -199,35 +207,6 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "access_audit" {
   }
 }
 
-resource "aws_s3_bucket_lifecycle_configuration" "access_audit" {
-  bucket = aws_s3_bucket.access_audit.id
-
-  rule {
-    id     = "lifecycle"
-    status = "Enabled"
-
-    filter { prefix = "" }
-
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
-    }
-
-    expiration {
-      days = var.lifecycle_expire_days
-    }
-
-    noncurrent_version_expiration {
-      noncurrent_days = var.lifecycle_expire_days
-    }
-
-    transition {
-      days          = var.lifecycle_glacier_days
-      storage_class = "GLACIER"
-    }
-  }
-}
-
-# ✅ tfsec fix: enable logging for access_audit bucket (to sink)
 resource "aws_s3_bucket_logging" "access_audit" {
   bucket        = aws_s3_bucket.access_audit.id
   target_bucket = aws_s3_bucket.access_audit_sink.id
@@ -235,7 +214,7 @@ resource "aws_s3_bucket_logging" "access_audit" {
 }
 
 # ------------------------------------------------------------
-# Access logs bucket for main ALB logs bucket
+# Access bucket for ALB logs bucket (S3 server access logs target)
 # ------------------------------------------------------------
 resource "aws_s3_bucket" "alb_logs_access" {
   bucket        = local.log_access_bucket_name
@@ -370,7 +349,7 @@ resource "aws_s3_bucket_logging" "alb_logs" {
   target_prefix = "${var.alb_log_prefix}/"
 }
 
-# ------------------------------------------------------------
+# ----------------------------------------------------
 # Audit logs bucket + its access bucket
 # ------------------------------------------------------------
 resource "aws_s3_bucket" "alb_logs_audit" {
@@ -463,220 +442,117 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs_audit_ac
   }
 }
 
-resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_audit_access" {
-  bucket = aws_s3_bucket.alb_logs_audit_access.id
-
-  rule {
-    id     = "lifecycle"
-    status = "Enabled"
-
-    filter { prefix = "" }
-
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
-    }
-
-    expiration {
-      days = var.lifecycle_expire_days
-    }
-
-    noncurrent_version_expiration {
-      noncurrent_days = var.lifecycle_expire_days
-    }
-
-    transition {
-      days          = var.lifecycle_glacier_days
-      storage_class = "GLACIER"
-    }
-  }
-}
-
-resource "aws_s3_bucket_logging" "alb_logs_audit_access" {
-  bucket        = aws_s3_bucket.alb_logs_audit_access.id
-  target_bucket = aws_s3_bucket.access_audit.id
-  target_prefix = "${var.alb_log_prefix}/audit-access-bucket/"
-}
-
 resource "aws_s3_bucket_logging" "alb_logs_audit" {
   bucket        = aws_s3_bucket.alb_logs_audit.id
   target_bucket = aws_s3_bucket.alb_logs_audit_access.id
   target_prefix = "${var.alb_log_prefix}/audit/"
 }
 
+resource "aws_s3_bucket_logging" "alb_logs_audit_access" {
+  bucket        = aws_s3_bucket.alb_logs_audit_access.id
+  target_bucket = aws_s3_bucket.access_audit.id
+  target_prefix = "${var.alb_log_prefix}/audit-access/"
+}
+
 # ------------------------------------------------------------
-# KMS CMK for SNS topic encryption (required by CKV_AWS_26)
+# Ownership + ACLs for log delivery (keeps ALB/S3 log delivery compatible)
 # ------------------------------------------------------------
-resource "aws_kms_key" "sns" {
-  description             = "CMK for SNS topic encryption (${var.name_prefix})"
-  deletion_window_in_days = 7
-  enable_key_rotation     = true
-
-  tags = merge(var.tags, {
-    Name = "${var.name_prefix}-sns-kms"
-  })
-}
-
-data "aws_iam_policy_document" "sns_kms_policy" {
-  statement {
-    sid     = "EnableRootPermissions"
-    effect  = "Allow"
-    actions = ["kms:*"]
-
-    principals {
-      type        = "AWS"
-      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
-    }
-
-    resources = ["*"]
-  }
-
-  statement {
-    sid    = "AllowSNSUseOfTheKey"
-    effect = "Allow"
-    actions = [
-      "kms:Encrypt",
-      "kms:Decrypt",
-      "kms:ReEncrypt*",
-      "kms:GenerateDataKey*",
-      "kms:DescribeKey"
-    ]
-
-    principals {
-      type        = "Service"
-      identifiers = ["sns.amazonaws.com"]
-    }
-
-    resources = ["*"]
-
-    condition {
-      test     = "StringEquals"
-      variable = "kms:CallerAccount"
-      values   = [data.aws_caller_identity.current.account_id]
-    }
+locals {
+  log_buckets = {
+    alb_logs              = aws_s3_bucket.alb_logs.id
+    alb_logs_access       = aws_s3_bucket.alb_logs_access.id
+    alb_logs_audit        = aws_s3_bucket.alb_logs_audit.id
+    alb_logs_audit_access = aws_s3_bucket.alb_logs_audit_access.id
+    access_audit          = aws_s3_bucket.access_audit.id
+    access_audit_sink     = aws_s3_bucket.access_audit_sink.id
   }
 }
 
-resource "aws_kms_key_policy" "sns" {
-  key_id = aws_kms_key.sns.id
-  policy = data.aws_iam_policy_document.sns_kms_policy.json
-}
+resource "aws_s3_bucket_ownership_controls" "log_buckets" {
+  for_each = local.log_buckets
+  bucket   = each.value
 
-resource "aws_kms_alias" "sns" {
-  name          = "alias/${var.name_prefix}-sns"
-  target_key_id = aws_kms_key.sns.key_id
-}
-
-# -----------------------------
-# S3 Event Notifications (Checkov CKV2_AWS_62)
-# -----------------------------
-resource "aws_sns_topic" "s3_events" {
-  name              = "${var.name_prefix}-alb-logs-s3-events"
-  kms_master_key_id = aws_kms_key.alb_logs.arn
-
-  tags = merge(var.tags, { Name = "${var.name_prefix}-alb-logs-s3-events" })
-}
-
-data "aws_iam_policy_document" "s3_events_topic_policy" {
-  statement {
-    sid    = "AllowS3Publish"
-    effect = "Allow"
-
-    principals {
-      type        = "Service"
-      identifiers = ["s3.amazonaws.com"]
-    }
-
-    actions   = ["sns:Publish"]
-    resources = [aws_sns_topic.s3_events.arn]
-
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [local.account_id]
-    }
-
-    condition {
-      test     = "ArnLike"
-      variable = "aws:SourceArn"
-      values = [
-        aws_s3_bucket.alb_logs.arn,
-        aws_s3_bucket.alb_logs_access.arn,
-        aws_s3_bucket.alb_logs_audit.arn,
-        aws_s3_bucket.alb_logs_audit_access.arn,
-        aws_s3_bucket.access_audit.arn,
-        aws_s3_bucket.access_audit_sink.arn
-      ]
-    }
+  rule {
+    object_ownership = "BucketOwnerPreferred"
   }
 }
 
-resource "aws_sns_topic_policy" "s3_events" {
-  arn    = aws_sns_topic.s3_events.arn
-  policy = data.aws_iam_policy_document.s3_events_topic_policy.json
+resource "aws_s3_bucket_acl" "log_buckets" {
+  for_each = local.log_buckets
+  bucket   = each.value
+  acl      = "private"
+
+  depends_on = [
+    aws_s3_bucket_ownership_controls.log_buckets
+  ]
 }
 
-resource "aws_s3_bucket_notification" "alb_logs" {
+# Bucket policy that allows the ALB service to write access logs
+resource "aws_s3_bucket_policy" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
-
-  topic {
-    topic_arn = aws_sns_topic.s3_events.arn
-    events    = ["s3:ObjectCreated:*"]
-  }
-
-  depends_on = [aws_sns_topic_policy.s3_events]
+  policy = data.aws_iam_policy_document.alb_logs_bucket_policy.json
 }
 
-resource "aws_s3_bucket_notification" "alb_logs_access" {
-  bucket = aws_s3_bucket.alb_logs_access.id
-
-  topic {
-    topic_arn = aws_sns_topic.s3_events.arn
-    events    = ["s3:ObjectCreated:*"]
+# S3 Server Access Logging targets need permission for logging.s3.amazonaws.com
+locals {
+  s3_access_log_targets = {
+    alb_logs_access = {
+      id  = aws_s3_bucket.alb_logs_access.id
+      arn = aws_s3_bucket.alb_logs_access.arn
+    }
+    alb_logs_audit_access = {
+      id  = aws_s3_bucket.alb_logs_audit_access.id
+      arn = aws_s3_bucket.alb_logs_audit_access.arn
+    }
+    access_audit = {
+      id  = aws_s3_bucket.access_audit.id
+      arn = aws_s3_bucket.access_audit.arn
+    }
+    access_audit_sink = {
+      id  = aws_s3_bucket.access_audit_sink.id
+      arn = aws_s3_bucket.access_audit_sink.arn
+    }
   }
-
-  depends_on = [aws_sns_topic_policy.s3_events]
 }
 
-resource "aws_s3_bucket_notification" "alb_logs_audit" {
-  bucket = aws_s3_bucket.alb_logs_audit.id
+data "aws_iam_policy_document" "s3_access_log_target" {
+  for_each = local.s3_access_log_targets
 
-  topic {
-    topic_arn = aws_sns_topic.s3_events.arn
-    events    = ["s3:ObjectCreated:*"]
+  statement {
+    sid     = "S3ServerAccessLogsWrite"
+    effect  = "Allow"
+    actions = ["s3:PutObject"]
+    resources = [
+      "${each.value.arn}/*"
+    ]
+    principals {
+      type        = "Service"
+      identifiers = ["logging.s3.amazonaws.com"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-acl"
+      values   = ["bucket-owner-full-control"]
+    }
   }
 
-  depends_on = [aws_sns_topic_policy.s3_events]
+  statement {
+    sid     = "S3ServerAccessLogsAclCheck"
+    effect  = "Allow"
+    actions = ["s3:GetBucketAcl"]
+    resources = [
+      each.value.arn
+    ]
+    principals {
+      type        = "Service"
+      identifiers = ["logging.s3.amazonaws.com"]
+    }
+  }
 }
 
-resource "aws_s3_bucket_notification" "alb_logs_audit_access" {
-  bucket = aws_s3_bucket.alb_logs_audit_access.id
+resource "aws_s3_bucket_policy" "s3_access_log_target" {
+  for_each = local.s3_access_log_targets
 
-  topic {
-    topic_arn = aws_sns_topic.s3_events.arn
-    events    = ["s3:ObjectCreated:*"]
-  }
-
-  depends_on = [aws_sns_topic_policy.s3_events]
-}
-
-resource "aws_s3_bucket_notification" "access_audit" {
-  bucket = aws_s3_bucket.access_audit.id
-
-  topic {
-    topic_arn = aws_sns_topic.s3_events.arn
-    events    = ["s3:ObjectCreated:*"]
-  }
-
-  depends_on = [aws_sns_topic_policy.s3_events]
-}
-
-resource "aws_s3_bucket_notification" "access_audit_sink" {
-  bucket = aws_s3_bucket.access_audit_sink.id
-
-  topic {
-    topic_arn = aws_sns_topic.s3_events.arn
-    events    = ["s3:ObjectCreated:*"]
-  }
-
-  depends_on = [aws_sns_topic_policy.s3_events]
+  bucket = each.value.id
+  policy = data.aws_iam_policy_document.s3_access_log_target[each.key].json
 }
