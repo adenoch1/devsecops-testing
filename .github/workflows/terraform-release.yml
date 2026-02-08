@@ -44,7 +44,7 @@ env:
   WORKDIR: "infra/envs/dev"
 
 jobs:
-  ##########################################################
+  #########################################################
   # Gate 1 (DEV): Bootstrap Infra (safe even before image)
   # - Creates ECR/VPC/ALB/etc
   # - Keeps ECS desired_count=0 to avoid image-pull failures
