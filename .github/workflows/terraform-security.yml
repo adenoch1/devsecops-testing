@@ -5,6 +5,7 @@ on:
     branches: ["main"]
     paths:
       - "infra/**/*.tf"
+      - "infra/modules/**/*.tf"
       - "infra/**/terraform.tfvars"
       - "modules/**/*.tf"
       - "policy/**"
@@ -46,7 +47,17 @@ jobs:
 
       - name: Terraform fmt (check)
         working-directory: .
-        run: terraform fmt -check -recursive infra modules
+        run: |
+          set -euo pipefail
+
+          # Some repos keep modules at repo root (./modules), others under ./infra/modules.
+          # This makes fmt check resilient to either layout.
+          targets=("infra")
+          if [ -d "modules" ]; then targets+=("modules"); fi
+          if [ -d "infra/modules" ]; then targets+=("infra/modules"); fi
+
+          echo "Running: terraform fmt -check -recursive ${targets[*]}"
+          terraform fmt -check -recursive "${targets[@]}"
 
       - name: Terraform init
         run: terraform init -input=false -reconfigure

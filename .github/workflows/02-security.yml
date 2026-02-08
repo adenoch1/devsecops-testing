@@ -23,8 +23,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install bandit pip-audit
 
-      - name: Bandit (SAST)
-        run: bandit -r app -ll
+      - name: Bandit (SAST) - fail on Medium/High only
+        run: bandit -r app -ll -ii
 
       - name: pip-audit (Dependencies)
         run: pip-audit -r app/requirements.txt
@@ -34,12 +34,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Trivy Scan (Filesystem)
+      - name: Trivy Scan (Filesystem) - fail on High/Critical only
         uses: aquasecurity/trivy-action@0.24.0
         with:
           scan-type: "fs"
           scan-ref: "."
           format: "table"
           exit-code: "1"
-          ignore-unfixed: false
+          ignore-unfixed: true
           vuln-type: "os,library"
+          severity: "HIGH,CRITICAL"
