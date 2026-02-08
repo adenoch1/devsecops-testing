@@ -358,11 +358,6 @@ resource "aws_s3_bucket_logging" "alb_logs_audit" {
 }
 
 # -----------------------------
-# OPTIONAL: replication setup (if enabled)
-# -----------------------------
-# (kept as-is in your repo — no changes needed for Checkov)
-
-# -----------------------------
 # S3 Event Notifications (Checkov CKV2_AWS_62)
 # -----------------------------
 resource "aws_sns_topic" "s3_events" {
@@ -451,14 +446,4 @@ resource "aws_s3_bucket_notification" "alb_logs_audit_access" {
   }
 
   depends_on = [aws_sns_topic_policy.s3_events]
-}
-
-output "alb_log_bucket_name" {
-  value       = aws_s3_bucket.alb_logs.bucket
-  description = "Main ALB access logs bucket name"
-}
-
-output "cloudwatch_logs_kms_key_arn" {
-  value       = aws_kms_key.cloudwatch_logs.arn
-  description = "KMS key ARN for CloudWatch Logs encryption"
 }
