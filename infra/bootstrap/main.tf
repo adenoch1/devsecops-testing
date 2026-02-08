@@ -60,6 +60,136 @@ resource "aws_kms_key_policy" "tflocks" {
 }
 
 # -----------------------------
+# KMS key for S3 access logs bucket (SSE-KMS)
+# -----------------------------
+data "aws_iam_policy_document" "tfstate_logs_kms_policy" {
+  statement {
+    sid     = "EnableRootPermissions"
+    effect  = "Allow"
+    actions = ["kms:*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "AllowS3UseForAccessLogsBucket"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["s3.amazonaws.com"]
+    }
+
+    actions = [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:DescribeKey"
+    ]
+
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values   = ["arn:aws:s3:::${var.state_bucket_name}-logs"]
+    }
+  }
+}
+
+resource "aws_kms_key" "tfstate_logs" {
+  description             = "KMS key for Terraform access logs bucket encryption"
+  enable_key_rotation     = true
+  deletion_window_in_days = 30
+
+  tags = merge(var.tags, { Name = "tfstate-logs-kms" })
+}
+
+resource "aws_kms_key_policy" "tfstate_logs" {
+  key_id = aws_kms_key.tfstate_logs.id
+  policy = data.aws_iam_policy_document.tfstate_logs_kms_policy.json
+}
+
+resource "aws_kms_alias" "tfstate_logs" {
+  name          = "alias/${var.state_bucket_name}-logs"
+  target_key_id = aws_kms_key.tfstate_logs.key_id
+}
+
+# -----------------------------
+# KMS key for SNS topic encryption (at rest)
+# -----------------------------
+data "aws_iam_policy_document" "tfstate_events_kms_policy" {
+  statement {
+    sid     = "EnableRootPermissions"
+    effect  = "Allow"
+    actions = ["kms:*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "AllowSNSServiceUse"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["sns.amazonaws.com"]
+    }
+
+    actions = [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:DescribeKey"
+    ]
+
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+}
+
+resource "aws_kms_key" "tfstate_events" {
+  description             = "KMS key for Terraform state event SNS topic encryption"
+  enable_key_rotation     = true
+  deletion_window_in_days = 30
+
+  tags = merge(var.tags, { Name = "tfstate-events-kms" })
+}
+
+resource "aws_kms_key_policy" "tfstate_events" {
+  key_id = aws_kms_key.tfstate_events.id
+  policy = data.aws_iam_policy_document.tfstate_events_kms_policy.json
+}
+
+resource "aws_kms_alias" "tfstate_events" {
+  name          = "alias/${var.state_bucket_name}-events"
+  target_key_id = aws_kms_key.tfstate_events.key_id
+}
+
+# -----------------------------
 # S3 bucket for access logs (target for tfstate access logging)
 # -----------------------------
 resource "aws_s3_bucket" "tfstate_logs" {
@@ -88,7 +218,55 @@ resource "aws_s3_bucket_versioning" "tfstate_logs" {
 resource "aws_s3_bucket_server_side_encryption_configuration" "tfstate_logs" {
   bucket = aws_s3_bucket.tfstate_logs.id
   rule {
-    apply_server_side_encryption_by_default { sse_algorithm = "AES256" }
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.tfstate_logs.arn
+    }
+  }
+}
+
+# Lifecycle policy for access logs (transition + retention)
+resource "aws_s3_bucket_lifecycle_configuration" "tfstate_logs" {
+  bucket = aws_s3_bucket.tfstate_logs.id
+
+  rule {
+    id     = "access-logs-retention"
+    status = "Enabled"
+    filter {}
+
+    transition {
+      days          = 30
+      storage_class = "STANDARD_IA"
+    }
+
+    transition {
+      days          = 90
+      storage_class = "GLACIER"
+    }
+
+    expiration {
+      days = 365
+    }
+  }
+
+  rule {
+    id     = "abort-incomplete-multipart"
+    status = "Enabled"
+    filter {}
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+
+  rule {
+    id     = "noncurrent-version-expiry"
+    status = "Enabled"
+    filter {}
+
+    noncurrent_version_expiration {
+      noncurrent_days = 90
+    }
   }
 }
 
@@ -103,19 +281,15 @@ data "aws_iam_policy_document" "tfstate_logs_bucket_policy" {
       identifiers = ["logging.s3.amazonaws.com"]
     }
 
-    actions   = ["s3:PutObject"]
-    resources = ["${aws_s3_bucket.tfstate_logs.arn}/tfstate/*"]
+    actions = ["s3:PutObject"]
+    resources = [
+      "${aws_s3_bucket.tfstate_logs.arn}/*"
+    ]
 
     condition {
       test     = "StringEquals"
       variable = "aws:SourceAccount"
       values   = [data.aws_caller_identity.current.account_id]
-    }
-
-    condition {
-      test     = "ArnLike"
-      variable = "aws:SourceArn"
-      values   = [aws_s3_bucket.tfstate.arn]
     }
   }
 }
@@ -126,7 +300,7 @@ resource "aws_s3_bucket_policy" "tfstate_logs" {
 }
 
 # -----------------------------
-# S3 bucket for Terraform remote state
+# Terraform remote state bucket
 # -----------------------------
 resource "aws_s3_bucket" "tfstate" {
   bucket = var.state_bucket_name
@@ -193,18 +367,18 @@ resource "aws_s3_bucket_lifecycle_configuration" "tfstate" {
   }
 }
 
-# Enforce HTTPS-only access to the tfstate bucket
+# Require TLS (deny insecure transport)
 data "aws_iam_policy_document" "tfstate_deny_insecure" {
   statement {
-    sid     = "DenyInsecureTransport"
-    effect  = "Deny"
-    actions = ["s3:*"]
+    sid    = "DenyInsecureTransport"
+    effect = "Deny"
 
     principals {
-      type        = "*"
+      type        = "AWS"
       identifiers = ["*"]
     }
 
+    actions = ["s3:*"]
     resources = [
       aws_s3_bucket.tfstate.arn,
       "${aws_s3_bucket.tfstate.arn}/*"
@@ -225,8 +399,9 @@ resource "aws_s3_bucket_policy" "tfstate" {
 
 # Minimal, production-valid event notifications (SNS topic)
 resource "aws_sns_topic" "tfstate_events" {
-  name = "${var.state_bucket_name}-events"
-  tags = merge(var.tags, { Name = "${var.state_bucket_name}-events" })
+  name              = "${var.state_bucket_name}-events"
+  kms_master_key_id = aws_kms_key.tfstate_events.arn
+  tags              = merge(var.tags, { Name = "${var.state_bucket_name}-events" })
 }
 
 data "aws_iam_policy_document" "sns_allow_s3_publish" {
@@ -245,7 +420,7 @@ data "aws_iam_policy_document" "sns_allow_s3_publish" {
     condition {
       test     = "ArnLike"
       variable = "aws:SourceArn"
-      values   = [aws_s3_bucket.tfstate.arn]
+      values   = [aws_s3_bucket.tfstate.arn, aws_s3_bucket.tfstate_logs.arn]
     }
 
     condition {
@@ -267,6 +442,18 @@ resource "aws_s3_bucket_notification" "tfstate" {
   topic {
     topic_arn = aws_sns_topic.tfstate_events.arn
     events    = ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"]
+  }
+
+  depends_on = [aws_sns_topic_policy.tfstate_events]
+}
+
+# Event notifications for the access logs bucket (meets logging/compliance checks)
+resource "aws_s3_bucket_notification" "tfstate_logs" {
+  bucket = aws_s3_bucket.tfstate_logs.id
+
+  topic {
+    topic_arn = aws_sns_topic.tfstate_events.arn
+    events    = ["s3:ObjectCreated:*"]
   }
 
   depends_on = [aws_sns_topic_policy.tfstate_events]
