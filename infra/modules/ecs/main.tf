@@ -14,7 +14,9 @@ resource "aws_cloudwatch_log_group" "app" {
 }
 
 # -----------------------------
-# Security Groups
+# Security Groups (STRICT + NO CYCLE)
+# - Create SGs with NO inline rules
+# - Add rules using aws_vpc_security_group_*_rule resources
 # -----------------------------
 
 #tfsec:ignore:aws-ec2-no-public-ingress-sgr
@@ -22,15 +24,6 @@ resource "aws_security_group" "alb" {
   name        = "${var.name_prefix}-alb-sg"
   description = "ALB security group"
   vpc_id      = var.vpc_id
-
-  ingress {
-    description      = "HTTPS from internet"
-    from_port        = 443
-    to_port          = 443
-    protocol         = "tcp"
-    cidr_blocks      = ["0.0.0.0/0"]
-    ipv6_cidr_blocks = ["::/0"]
-  }
 
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-alb-sg"
@@ -42,41 +35,78 @@ resource "aws_security_group" "ecs" {
   description = "ECS tasks security group"
   vpc_id      = var.vpc_id
 
-  ingress {
-    description     = "App traffic from ALB only"
-    from_port       = var.app_port
-    to_port         = var.app_port
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
-  }
-
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-ecs-sg"
   })
 }
 
-# ALB egress: only to ECS tasks on app port
-resource "aws_security_group_rule" "alb_to_ecs_app_port" {
-  type                     = "egress"
-  description              = "ALB to ECS tasks on app port"
-  security_group_id        = aws_security_group.alb.id
-  from_port                = var.app_port
-  to_port                  = var.app_port
-  protocol                 = "tcp"
-  source_security_group_id = aws_security_group.ecs.id
-}
-
-# ECS tasks egress: HTTPS only (commonly required for AWS APIs/ECR via NAT)
-#tfsec:ignore:aws-ec2-no-public-egress-sgr
-resource "aws_security_group_rule" "ecs_egress_https" {
-  type              = "egress"
-  description       = "ECS tasks outbound HTTPS only"
-  security_group_id = aws_security_group.ecs.id
+# -----------------------------
+# ALB inbound rules (HTTPS)
+# -----------------------------
+resource "aws_vpc_security_group_ingress_rule" "alb_https_ipv4" {
+  security_group_id = aws_security_group.alb.id
+  description       = "HTTPS from internet (IPv4)"
+  ip_protocol       = "tcp"
   from_port         = 443
   to_port           = 443
-  protocol          = "tcp"
-  cidr_blocks       = ["0.0.0.0/0"]
+  cidr_ipv4         = "0.0.0.0/0"
 }
+
+resource "aws_vpc_security_group_ingress_rule" "alb_https_ipv6" {
+  security_group_id = aws_security_group.alb.id
+  description       = "HTTPS from internet (IPv6)"
+  ip_protocol       = "tcp"
+  from_port         = 443
+  to_port           = 443
+  cidr_ipv6         = "::/0"
+}
+
+# -----------------------------
+# ALB outbound rules (to ECS on app port only)
+# -----------------------------
+resource "aws_vpc_security_group_egress_rule" "alb_to_ecs_app_port" {
+  security_group_id            = aws_security_group.alb.id
+  description                  = "ALB to ECS tasks on app port only"
+  ip_protocol                  = "tcp"
+  from_port                    = var.app_port
+  to_port                      = var.app_port
+  referenced_security_group_id = aws_security_group.ecs.id
+}
+
+# -----------------------------
+# ECS inbound rule (from ALB only)
+# -----------------------------
+resource "aws_vpc_security_group_ingress_rule" "ecs_from_alb_app_port" {
+  security_group_id            = aws_security_group.ecs.id
+  description                  = "App traffic from ALB only"
+  ip_protocol                  = "tcp"
+  from_port                    = var.app_port
+  to_port                      = var.app_port
+  referenced_security_group_id = aws_security_group.alb.id
+}
+
+# -----------------------------
+# ECS outbound rule (HTTPS only)
+# -----------------------------
+#tfsec:ignore:aws-ec2-no-public-egress-sgr
+resource "aws_vpc_security_group_egress_rule" "ecs_https_out_ipv4" {
+  security_group_id = aws_security_group.ecs.id
+  description       = "ECS tasks outbound HTTPS only (IPv4) via NAT"
+  ip_protocol       = "tcp"
+  from_port         = 443
+  to_port           = 443
+  cidr_ipv4         = "0.0.0.0/0"
+}
+
+# Optional IPv6 parity (enable only if your environment uses IPv6 egress and scanners require it)
+# resource "aws_vpc_security_group_egress_rule" "ecs_https_out_ipv6" {
+#   security_group_id = aws_security_group.ecs.id
+#   description       = "ECS tasks outbound HTTPS only (IPv6)"
+#   ip_protocol       = "tcp"
+#   from_port         = 443
+#   to_port           = 443
+#   cidr_ipv6         = "::/0"
+# }
 
 # ------------------------------
 # Application Load Balancer (HTTPS enforced)
@@ -94,7 +124,6 @@ resource "aws_lb" "this" {
   drop_invalid_header_fields = true
 
   enable_deletion_protection = true
-
 
   access_logs {
     bucket  = var.alb_log_bucket_name

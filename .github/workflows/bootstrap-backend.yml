@@ -34,10 +34,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           if [ -z "${{ secrets.AWS_ROLE_ARN_APPLY }}" ]; then
             echo "ERROR: Environment 'dev' secret AWS_ROLE_ARN_APPLY is missing/empty."
             exit 1
           fi
+
           if [ -z "${{ secrets.AWS_REGION }}" ]; then
             echo "ERROR: Environment 'dev' secret AWS_REGION is missing/empty."
             exit 1
