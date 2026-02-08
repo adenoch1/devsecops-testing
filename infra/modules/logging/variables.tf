@@ -3,6 +3,11 @@ variable "name_prefix" {
   type        = string
 }
 
+variable "aws_region" {
+  description = "AWS region (used in KMS policies, e.g., ca-central-1)"
+  type        = string
+}
+
 variable "tags" {
   description = "Common tags applied to resources"
   type        = map(string)
@@ -17,7 +22,7 @@ variable "alb_log_prefix" {
 }
 
 variable "alb_log_retention_days" {
-  description = "Retention (days) for ALB log objects in S3"
+  description = "Retention (days) for ALB log objects in S3 (kept for compatibility; lifecycle_expire_days is used)"
   type        = number
   default     = 365
 }
@@ -48,9 +53,9 @@ variable "replication_region" {
   default     = ""
 }
 
-# CloudWatch retention
+# CloudWatch retention (kept for compatibility; not used in this logging-only module)
 variable "flow_log_retention_days" {
-  description = "Retention (days) for the VPC flow logs CloudWatch log group"
+  description = "Retention (days) for the VPC flow logs CloudWatch log group (not used in this module)"
   type        = number
   default     = 365
 }
