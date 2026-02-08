@@ -278,19 +278,18 @@ resource "aws_s3_bucket_lifecycle_configuration" "tfstate" {
 # Access logs bucket for state bucket (optional but recommended)
 # -----------------------------
 resource "aws_s3_bucket" "tfstate_access_logs" {
-  bucket        = "${var.name_prefix}-tfstate-access-${data.aws_caller_identity.current.account_id}"
+  bucket = "${var.name_prefix}-tfstate-access-${data.aws_caller_identity.current.account_id}"
 
-    condition {
-      test     = "StringEquals"
-      variable = "s3:x-amz-server-side-encryption"
-      values   = ["aws:kms"]
-    }
+  condition {
+    test     = "StringEquals"
+    variable = "s3:x-amz-server-side-encryption"
+    values   = ["aws:kms"]
+  }
 
-    condition {
-      test     = "StringEquals"
-      variable = "s3:x-amz-server-side-encryption-aws-kms-key-id"
-      values   = [aws_kms_key.tfstate_logs.arn]
-    }
+  condition {
+    test     = "StringEquals"
+    variable = "s3:x-amz-server-side-encryption-aws-kms-key-id"
+    values   = [aws_kms_key.tfstate_logs.arn]
   }
 }
 
