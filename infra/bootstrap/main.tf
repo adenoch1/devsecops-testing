@@ -29,11 +29,11 @@ resource "aws_kms_key" "tfstate" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "EnableRootPermissions"
-        Effect   = "Allow"
+        Sid       = "EnableRootPermissions"
+        Effect    = "Allow"
         Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
-        Action   = "kms:*"
-        Resource = "*"
+        Action    = "kms:*"
+        Resource  = "*"
       }
     ]
   })
@@ -55,11 +55,11 @@ resource "aws_kms_key" "tfstate_logs" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "EnableRootPermissions"
-        Effect   = "Allow"
+        Sid       = "EnableRootPermissions"
+        Effect    = "Allow"
         Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
-        Action   = "kms:*"
-        Resource = "*"
+        Action    = "kms:*"
+        Resource  = "*"
       }
     ]
   })
@@ -81,11 +81,11 @@ resource "aws_kms_key" "tflocks" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "EnableRootPermissions"
-        Effect   = "Allow"
+        Sid       = "EnableRootPermissions"
+        Effect    = "Allow"
         Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
-        Action   = "kms:*"
-        Resource = "*"
+        Action    = "kms:*"
+        Resource  = "*"
       }
     ]
   })
@@ -304,7 +304,7 @@ resource "aws_s3_bucket_logging" "tfstate" {
 # S3 Event Notifications (Checkov CKV2_AWS_62)
 # -----------------------------
 resource "aws_sns_topic" "s3_events" {
-  name             = "${var.name_prefix}-s3-events"
+  name              = "${var.name_prefix}-s3-events"
   kms_master_key_id = aws_kms_key.tfstate_logs.arn
 
   tags = merge(var.tags, { Name = "${var.name_prefix}-s3-events" })

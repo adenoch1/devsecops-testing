@@ -23,15 +23,15 @@ resource "aws_kms_key" "alb_logs" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "EnableRootPermissions"
-        Effect   = "Allow"
+        Sid       = "EnableRootPermissions"
+        Effect    = "Allow"
         Principal = { AWS = "arn:aws:iam::${local.account_id}:root" }
-        Action   = "kms:*"
-        Resource = "*"
+        Action    = "kms:*"
+        Resource  = "*"
       },
       {
-        Sid    = "AllowS3UseOfKey"
-        Effect = "Allow"
+        Sid       = "AllowS3UseOfKey"
+        Effect    = "Allow"
         Principal = { Service = "s3.amazonaws.com" }
         Action = [
           "kms:Encrypt",
@@ -62,15 +62,15 @@ resource "aws_kms_key" "cloudwatch_logs" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "EnableRootPermissions"
-        Effect   = "Allow"
+        Sid       = "EnableRootPermissions"
+        Effect    = "Allow"
         Principal = { AWS = "arn:aws:iam::${local.account_id}:root" }
-        Action   = "kms:*"
-        Resource = "*"
+        Action    = "kms:*"
+        Resource  = "*"
       },
       {
-        Sid    = "AllowCloudWatchLogsUseOfKey"
-        Effect = "Allow"
+        Sid       = "AllowCloudWatchLogsUseOfKey"
+        Effect    = "Allow"
         Principal = { Service = "logs.${local.region}.amazonaws.com" }
         Action = [
           "kms:Encrypt",
