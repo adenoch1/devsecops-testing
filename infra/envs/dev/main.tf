@@ -1,3 +1,16 @@
+# Dev environment root module.
+
+locals {
+  tags = {
+    Project     = var.project
+    Environment = var.environment
+    Owner       = var.owner
+    ManagedBy   = "Terraform"
+  }
+
+  name_prefix = "${var.project}-${var.environment}"
+}
+
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
@@ -75,7 +88,9 @@ module "ecs" {
 
   desired_count = var.desired_count
   task_cpu      = var.task_cpu
-  task_memory   = var.task_memory
+  task_memory   = var.task_task_memory != null ? var.task_task_memory : var.task_memory
+  # If you do NOT have var.task_task_memory anywhere, delete the line above and keep the next line instead:
+  # task_memory = var.task_memory
 
   acm_certificate_arn         = var.acm_certificate_arn
   alb_log_bucket_name         = module.logging.alb_log_bucket_name
