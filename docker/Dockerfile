@@ -1,61 +1,43 @@
-# =========================================================
-# STAGE 1 — Build Dependencies
-# =========================================================
-FROM python:3.11-alpine AS builder
+# syntax=docker/dockerfile:1
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+# -----------------------------
+# Production-grade container image
+# - Minimal base (slim)
+# - Pinned dependencies
+# - Non-root runtime user
+# - No build tools left behind
+# -----------------------------
+
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app
 
-RUN apk add --no-cache gcc musl-dev linux-headers
+# Keep OS packages minimal (only what we need)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
+# Upgrade pip tooling (pinned for reproducibility)
+RUN python -m pip install --upgrade pip==26.0.1 wheel==0.46.3 setuptools
+
+# Install runtime deps first (better layer caching)
 COPY app/requirements.txt /app/requirements.txt
+RUN python -m pip install -r /app/requirements.txt
 
-# Create venv, upgrade pip to fixed version, install deps
-RUN python -m venv /opt/venv && \
-    /opt/venv/bin/python -m pip install --upgrade --no-cache-dir "pip==26.0" setuptools wheel==0.46.2 && \
-    /opt/venv/bin/pip install --no-cache-dir -r /app/requirements.txt && \
-    /opt/venv/bin/pip install --no-cache-dir --upgrade "jaraco.context==6.1.0" && \
-    /opt/venv/bin/pip check && \
-    # Remove any stale metadata if it exists
-    find /opt/venv -type d -name "jaraco.context-5.3.0.dist-info" -prune -exec rm -rf {} + || true && \
-    find /opt/venv -type d -name "pip-24.0.dist-info" -prune -exec rm -rf {} + || true
-
-
-# =========================================================
-# STAGE 2 — Runtime Image
-# =========================================================
-FROM python:3.11-alpine AS runtime
-
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
-WORKDIR /app
-
-RUN apk update && apk upgrade && rm -rf /var/cache/apk/*
-
-# Upgrade SYSTEM pip to fixed version (Trivy sees this one too)
-# CVE-2026-1703 fixed in pip 26.0
-RUN python -m pip install --upgrade --no-cache-dir "pip==26.0" setuptools "wheel==0.46.2" && \
-    python -m pip --version && \
-    python -c "import wheel; print('system wheel =', wheel.__version__)"
-
-# Copy venv from builder
-COPY --from=builder /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-# Remove stale dist-info from common system locations (where Trivy finds METADATA)
-RUN find /usr/local/lib -type d -name "jaraco.context-5.3.0.dist-info" -prune -exec rm -rf {} + || true && \
-    find /usr/local/lib -type d -name "pip-24.0.dist-info" -prune -exec rm -rf {} + || true && \
-    find /usr/lib -type d -name "jaraco.context-5.3.0.dist-info" -prune -exec rm -rf {} + || true && \
-    find /usr/lib -type d -name "pip-24.0.dist-info" -prune -exec rm -rf {} + || true
-
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
-
+# Copy application
 COPY app /app
-RUN chown -R appuser:appgroup /app
+
+# Create non-root user
+RUN useradd --create-home --shell /usr/sbin/nologin appuser \
+    && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 5000
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app", "--workers", "3", "--threads", "2"]
+
+# Gunicorn for production (WSGI)
+CMD ["gunicorn", "-b", "0.0.0.0:5000", "app:app"]
