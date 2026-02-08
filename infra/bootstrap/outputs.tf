@@ -1,19 +1,19 @@
-output "state_bucket_name" {
+output "tfstate_bucket_name" {
+  description = "S3 bucket name for Terraform remote state"
   value       = aws_s3_bucket.tfstate.bucket
-  description = "Remote state S3 bucket name"
 }
 
-output "lock_table_name" {
+output "tflocks_table_name" {
+  description = "DynamoDB table name for Terraform state locking"
   value       = aws_dynamodb_table.tflocks.name
-  description = "DynamoDB lock table name"
 }
 
 output "tfstate_kms_key_arn" {
+  description = "KMS key ARN used for encrypting the Terraform state bucket (SSE-KMS)"
   value       = aws_kms_key.tfstate.arn
-  description = "KMS key ARN used to encrypt tfstate"
 }
 
 output "tflocks_kms_key_arn" {
+  description = "KMS key ARN used for encrypting the DynamoDB lock table (SSE-KMS)"
   value       = aws_kms_key.tflocks.arn
-  description = "KMS key ARN used to encrypt DynamoDB locks"
 }

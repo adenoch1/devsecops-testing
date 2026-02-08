@@ -26,13 +26,7 @@ resource "aws_kms_key" "ecr" {
           "kms:ReEncrypt*",
           "kms:GenerateDataKey*",
           "kms:DescribeKey",
-          "kms:GetKeyPolicy",
-          "kms:PutKeyPolicy",
-          "kms:CreateGrant",
-          "kms:ListGrants",
-          "kms:RevokeGrant",
-          "kms:TagResource",
-          "kms:UntagResource"
+          "kms:CreateGrant"
         ]
         Resource = "*"
       },

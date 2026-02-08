@@ -13,10 +13,14 @@ module "logging" {
   source      = "../../modules/logging"
   name_prefix = local.name_prefix
   tags        = local.tags
+
   providers = {
     aws         = aws
     aws.replica = aws.replica
   }
+
+  # ✅ FIX: pass the region required by the module
+  aws_region = var.aws_region
 
   alb_log_prefix = var.alb_log_prefix
 
@@ -26,6 +30,7 @@ module "logging" {
   replication_enabled = var.replication_enabled
   replication_region  = var.replication_region
 }
+
 
 
 module "network" {
