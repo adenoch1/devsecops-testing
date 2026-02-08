@@ -320,9 +320,9 @@ jobs:
       - name: Terraform destroy
         run: terraform destroy -auto-approve -parallelism=1
 
-  ########################################################
+  #######################################################
   # Standalone destroy (manual)
-  ########################################################
+  #######################################################
   destroy_only:
     name: Destroy (standalone)
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.action == 'destroy' }}
