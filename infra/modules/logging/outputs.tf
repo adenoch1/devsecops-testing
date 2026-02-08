@@ -27,3 +27,8 @@ output "cloudwatch_logs_kms_key_arn" {
   description = "KMS CMK ARN for CloudWatch Log Groups encryption"
   value       = aws_kms_key.cloudwatch_logs.arn
 }
+
+output "sns_kms_key_arn" {
+  description = "KMS CMK ARN used to encrypt the SNS topic"
+  value       = aws_kms_key.sns.arn
+}

@@ -503,6 +503,69 @@ resource "aws_s3_bucket_logging" "alb_logs_audit" {
   target_prefix = "${var.alb_log_prefix}/audit/"
 }
 
+# ------------------------------------------------------------
+# KMS CMK for SNS topic encryption (required by CKV_AWS_26)
+# ------------------------------------------------------------
+resource "aws_kms_key" "sns" {
+  description             = "CMK for SNS topic encryption (${var.name_prefix})"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-sns-kms"
+  })
+}
+
+data "aws_iam_policy_document" "sns_kms_policy" {
+  statement {
+    sid     = "EnableRootPermissions"
+    effect  = "Allow"
+    actions = ["kms:*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "AllowSNSUseOfTheKey"
+    effect = "Allow"
+    actions = [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:DescribeKey"
+    ]
+
+    principals {
+      type        = "Service"
+      identifiers = ["sns.amazonaws.com"]
+    }
+
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:CallerAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+}
+
+resource "aws_kms_key_policy" "sns" {
+  key_id = aws_kms_key.sns.id
+  policy = data.aws_iam_policy_document.sns_kms_policy.json
+}
+
+resource "aws_kms_alias" "sns" {
+  name          = "alias/${var.name_prefix}-sns"
+  target_key_id = aws_kms_key.sns.key_id
+}
+
 # -----------------------------
 # S3 Event Notifications (Checkov CKV2_AWS_62)
 # -----------------------------
