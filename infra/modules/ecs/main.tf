@@ -39,9 +39,6 @@ resource "aws_security_group" "alb" {
     ipv6_cidr_blocks = ["::/0"]
   }
 
-  # IMPORTANT: This breaks the cycle.
-  # We restrict egress to the VPC CIDR on the app port (tight enough for prod),
-  # instead of referencing the ECS SG directly.
   egress {
     description = "ALB to ECS tasks on app port (VPC CIDR)"
     from_port   = var.app_port
@@ -55,7 +52,6 @@ resource "aws_security_group" "alb" {
   })
 }
 
-# ECS SG: ingress only from ALB SG; egress limited to needed destinations
 resource "aws_security_group" "ecs" {
   name        = "${var.name_prefix}-ecs-sg"
   description = "ECS tasks security group"
@@ -126,6 +122,101 @@ resource "aws_lb" "this" {
   })
 }
 
+# ------------------------------
+# WAFv2 (Required by Checkov CKV2_AWS_28)
+# ------------------------------
+resource "aws_wafv2_web_acl" "alb" {
+  name        = "${var.name_prefix}-waf"
+  description = "WAF for public ALB"
+  scope       = "REGIONAL"
+
+  default_action {
+    allow {}
+  }
+
+  visibility_config {
+    cloudwatch_metrics_enabled = true
+    metric_name                = "${var.name_prefix}-waf"
+    sampled_requests_enabled   = true
+  }
+
+  # Baseline managed rule set (good production default)
+  rule {
+    name     = "AWSManagedRulesCommonRuleSet"
+    priority = 10
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesCommonRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "AWSManagedRulesCommonRuleSet"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  rule {
+    name     = "AWSManagedRulesKnownBadInputsRuleSet"
+    priority = 20
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesKnownBadInputsRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "AWSManagedRulesKnownBadInputsRuleSet"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  rule {
+    name     = "AWSManagedRulesAmazonIpReputationList"
+    priority = 30
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesAmazonIpReputationList"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "AWSManagedRulesAmazonIpReputationList"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-waf"
+  })
+}
+
+resource "aws_wafv2_web_acl_association" "alb" {
+  resource_arn = aws_lb.this.arn
+  web_acl_arn  = aws_wafv2_web_acl.alb.arn
+}
+
 resource "aws_lb_target_group" "app" {
   name        = "${var.name_prefix}-tg"
   port        = var.app_port
@@ -160,7 +251,7 @@ resource "aws_lb_listener" "https" {
   }
 }
 
-# ------------------------------------------------------------
+# -------------------------------------------------------------
 # ECS Cluster + Task + Service (Fargate)
 # ------------------------------------------------------------
 resource "aws_ecs_cluster" "this" {
