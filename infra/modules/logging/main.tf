@@ -7,49 +7,67 @@ locals {
 }
 
 # -------------------------------------------------------------
-# KMS CMK for ALB Logs bucket encryption (S3)
-# IMPORTANT: allow S3/ELB log delivery to use the key (SSE-KMS)
+# KMS CMK for S3 log buckets (required by CKV_AWS_145)
 # -------------------------------------------------------------
 resource "aws_kms_key" "alb_logs" {
-  description             = "CMK for ALB logs buckets (${var.name_prefix})"
+  description             = "CMK for ALB log buckets (${var.name_prefix})"
   deletion_window_in_days = 7
   enable_key_rotation     = true
 
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid       = "EnableRootPermissions"
-        Effect    = "Allow"
-        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
-        Action    = "kms:*"
-        Resource  = "*"
-      },
-
-      # Allow S3 to use the CMK for objects in these buckets (SSE-KMS)
-      {
-        Sid       = "AllowS3UseOfTheKey"
-        Effect    = "Allow"
-        Principal = { Service = "s3.amazonaws.com" }
-        Action = [
-          "kms:Encrypt",
-          "kms:Decrypt",
-          "kms:ReEncrypt*",
-          "kms:GenerateDataKey*",
-          "kms:DescribeKey"
-        ]
-        Resource = "*"
-        Condition = {
-          StringEquals = {
-            "kms:CallerAccount" = data.aws_caller_identity.current.account_id
-            "kms:ViaService"    = "s3.${data.aws_region.current.id}.amazonaws.com"
-          }
-        }
-      }
-    ]
-  })
-
   tags = merge(var.tags, { Name = "${var.name_prefix}-alb-logs-kms" })
+}
+
+data "aws_iam_policy_document" "alb_logs_kms_policy" {
+  # Root admin of the key
+  statement {
+    sid     = "EnableRootPermissions"
+    effect  = "Allow"
+    actions = ["kms:*"]
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+
+    resources = ["*"]
+  }
+
+  # Allow S3 to use the key for bucket encryption/decryption (SSE-KMS)
+  statement {
+    sid    = "AllowS3UseOfTheKey"
+    effect = "Allow"
+    actions = [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:DescribeKey"
+    ]
+
+    principals {
+      type        = "Service"
+      identifiers = ["s3.amazonaws.com"]
+    }
+
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:CallerAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["s3.${data.aws_region.current.id}.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_kms_key_policy" "alb_logs" {
+  key_id = aws_kms_key.alb_logs.id
+  policy = data.aws_iam_policy_document.alb_logs_kms_policy.json
 }
 
 resource "aws_kms_alias" "alb_logs" {
@@ -79,10 +97,7 @@ resource "aws_s3_bucket_public_access_block" "alb_logs_access" {
 
 resource "aws_s3_bucket_versioning" "alb_logs_access" {
   bucket = aws_s3_bucket.alb_logs_access.id
-
-  versioning_configuration {
-    status = "Enabled"
-  }
+  versioning_configuration { status = "Enabled" }
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs_access" {
@@ -125,7 +140,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
 }
 
 # ------------------------------------------------------------
-# Main ALB Logs bucket (the bucket ALB writes to)
+# Main ALB Logs bucket (bucket ALB writes to)
 # ------------------------------------------------------------
 resource "aws_s3_bucket" "alb_logs" {
   bucket        = local.log_bucket_name
@@ -146,10 +161,7 @@ resource "aws_s3_bucket_public_access_block" "alb_logs" {
 
 resource "aws_s3_bucket_versioning" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
-
-  versioning_configuration {
-    status = "Enabled"
-  }
+  versioning_configuration { status = "Enabled" }
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
@@ -191,7 +203,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
   }
 }
 
-# ✅ Correct: ALB logs bucket writes its SERVER ACCESS LOGS into access bucket
+# ✅ ALB logs bucket writes its SERVER ACCESS LOGS into access bucket
 resource "aws_s3_bucket_logging" "alb_logs" {
   bucket        = aws_s3_bucket.alb_logs.id
   target_bucket = aws_s3_bucket.alb_logs_access.id
@@ -200,12 +212,12 @@ resource "aws_s3_bucket_logging" "alb_logs" {
 
 # ------------------------------------------------------------
 # Bucket policies
-#   1) ALB log delivery -> alb_logs bucket
-#   2) S3 server access logs delivery -> alb_logs_access bucket
+#   1) ALB log delivery -> alb_logs bucket (SSE-KMS enforced)
+#   2) S3 server access logs -> alb_logs_access bucket (SSE-KMS enforced)
 # ------------------------------------------------------------
 
-# ✅ ALB access logging policy (this fixes your Access Denied)
 data "aws_iam_policy_document" "alb_logs_bucket_policy" {
+  # ELB log delivery needs ACL check
   statement {
     sid    = "AllowELBLogDeliveryAclCheck"
     effect = "Allow"
@@ -215,12 +227,11 @@ data "aws_iam_policy_document" "alb_logs_bucket_policy" {
       identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
     }
 
-    actions = ["s3:GetBucketAcl"]
-    resources = [
-      aws_s3_bucket.alb_logs.arn
-    ]
+    actions   = ["s3:GetBucketAcl"]
+    resources = [aws_s3_bucket.alb_logs.arn]
   }
 
+  # ELB log delivery write with SSE-KMS + ACL requirements
   statement {
     sid    = "AllowELBLogDeliveryWrite"
     effect = "Allow"
@@ -232,22 +243,31 @@ data "aws_iam_policy_document" "alb_logs_bucket_policy" {
 
     actions = ["s3:PutObject"]
     resources = [
-      # ALB will write to: <prefix>/AWSLogs/<account-id>/...
       "${aws_s3_bucket.alb_logs.arn}/${var.alb_log_prefix}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"
     ]
 
-    # Required by ELB log delivery
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
     condition {
       test     = "StringEquals"
       variable = "s3:x-amz-acl"
       values   = ["bucket-owner-full-control"]
     }
 
-    # Recommended safety
     condition {
       test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [data.aws_caller_identity.current.account_id]
+      variable = "s3:x-amz-server-side-encryption"
+      values   = ["aws:kms"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-server-side-encryption-aws-kms-key-id"
+      values   = [aws_kms_key.alb_logs.arn]
     }
   }
 }
@@ -257,7 +277,6 @@ resource "aws_s3_bucket_policy" "alb_logs" {
   policy = data.aws_iam_policy_document.alb_logs_bucket_policy.json
 }
 
-# ✅ S3 server access logs delivery policy MUST be on the TARGET bucket (alb_logs_access)
 data "aws_iam_policy_document" "alb_logs_access_bucket_policy" {
   statement {
     sid    = "AllowS3ServerAccessLogsAclCheck"
@@ -268,10 +287,8 @@ data "aws_iam_policy_document" "alb_logs_access_bucket_policy" {
       identifiers = ["logging.s3.amazonaws.com"]
     }
 
-    actions = ["s3:GetBucketAcl"]
-    resources = [
-      aws_s3_bucket.alb_logs_access.arn
-    ]
+    actions   = ["s3:GetBucketAcl"]
+    resources = [aws_s3_bucket.alb_logs_access.arn]
   }
 
   statement {
@@ -294,11 +311,22 @@ data "aws_iam_policy_document" "alb_logs_access_bucket_policy" {
       values   = [data.aws_caller_identity.current.account_id]
     }
 
-    # S3 access logs typically require this ACL
     condition {
       test     = "StringEquals"
       variable = "s3:x-amz-acl"
       values   = ["bucket-owner-full-control"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-server-side-encryption"
+      values   = ["aws:kms"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-server-side-encryption-aws-kms-key-id"
+      values   = [aws_kms_key.alb_logs.arn]
     }
   }
 }
@@ -308,102 +336,21 @@ resource "aws_s3_bucket_policy" "alb_logs_access" {
   policy = data.aws_iam_policy_document.alb_logs_access_bucket_policy.json
 }
 
-# -----------------------------------------------------------
-# KMS CMK for SQS encryption (required by CKV2_AWS_73)
-# -----------------------------------------------------------
-resource "aws_kms_key" "sqs_sse" {
-  description             = "CMK for SQS encryption (${var.name_prefix})"
-  deletion_window_in_days = 7
-  enable_key_rotation     = true
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-
-      {
-        Sid    = "EnableRootPermissions"
-        Effect = "Allow"
-        Principal = {
-          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
-        }
-        Action   = "kms:*"
-        Resource = "*"
-      },
-
-      {
-        Sid    = "AllowSQSUseOfTheKey"
-        Effect = "Allow"
-        Principal = {
-          Service = "sqs.amazonaws.com"
-        }
-        Action = [
-          "kms:Encrypt",
-          "kms:Decrypt",
-          "kms:ReEncrypt*",
-          "kms:GenerateDataKey",
-          "kms:GenerateDataKey*",
-          "kms:DescribeKey",
-          "kms:CreateGrant",
-          "kms:ListGrants",
-          "kms:RevokeGrant"
-        ]
-        Resource = "*"
-        Condition = {
-          StringEquals = {
-            "kms:ViaService"    = "sqs.${data.aws_region.current.id}.amazonaws.com"
-            "kms:CallerAccount" = data.aws_caller_identity.current.account_id
-          }
-          Bool = {
-            "kms:GrantIsForAWSResource" = "true"
-          }
-        }
-      },
-
-      {
-        Sid    = "AllowS3ToUseKeyViaSQS"
-        Effect = "Allow"
-        Principal = {
-          Service = "s3.amazonaws.com"
-        }
-        Action = [
-          "kms:GenerateDataKey",
-          "kms:Decrypt"
-        ]
-        Resource = "*"
-        Condition = {
-          StringEquals = {
-            "kms:ViaService" = "sqs.${data.aws_region.current.id}.amazonaws.com"
-          }
-        }
-      }
-    ]
-  })
+# ------------------------------------------------------------
+# ✅ CKV2_AWS_62: Event notifications enabled (SNS)
+# ------------------------------------------------------------
+resource "aws_sns_topic" "s3_log_events" {
+  name              = "${var.name_prefix}-s3-log-events"
+  kms_master_key_id = aws_kms_key.sns_topic.arn
 
   tags = merge(var.tags, {
-    Name = "${var.name_prefix}-sqs-cmk"
+    Name = "${var.name_prefix}-s3-log-events"
   })
 }
 
-resource "aws_kms_alias" "sqs_sse" {
-  name          = "alias/${var.name_prefix}-sqs-cmk"
-  target_key_id = aws_kms_key.sqs_sse.key_id
-}
-
-# ------------------------------------------------------------
-# SQS queue for S3 event notifications (encrypted with CMK)
-# ------------------------------------------------------------
-resource "aws_sqs_queue" "alb_logs_events" {
-  name              = "${var.name_prefix}-alb-logs-events"
-  kms_master_key_id = aws_kms_key.sqs_sse.arn
-
-  tags = merge(var.tags, {
-    Name = "${var.name_prefix}-alb-logs-events"
-  })
-}
-
-data "aws_iam_policy_document" "alb_logs_events_queue_policy" {
+data "aws_iam_policy_document" "sns_allow_s3_publish" {
   statement {
-    sid    = "AllowS3UseQueueFromAlbLogsBucket"
+    sid    = "AllowS3Publish"
     effect = "Allow"
 
     principals {
@@ -411,95 +358,55 @@ data "aws_iam_policy_document" "alb_logs_events_queue_policy" {
       identifiers = ["s3.amazonaws.com"]
     }
 
-    actions = [
-      "sqs:SendMessage",
-      "sqs:GetQueueAttributes"
-    ]
-
-    resources = [aws_sqs_queue.alb_logs_events.arn]
-
-    condition {
-      test     = "ArnEquals"
-      variable = "aws:SourceArn"
-      values   = [aws_s3_bucket.alb_logs.arn]
-    }
+    actions   = ["SNS:Publish"]
+    resources = [aws_sns_topic.s3_log_events.arn]
 
     condition {
       test     = "StringEquals"
       variable = "aws:SourceAccount"
       values   = [data.aws_caller_identity.current.account_id]
     }
-  }
-
-  statement {
-    sid    = "AllowS3UseQueueFromAlbLogsAccessBucket"
-    effect = "Allow"
-
-    principals {
-      type        = "Service"
-      identifiers = ["s3.amazonaws.com"]
-    }
-
-    actions = [
-      "sqs:SendMessage",
-      "sqs:GetQueueAttributes"
-    ]
-
-    resources = [aws_sqs_queue.alb_logs_events.arn]
 
     condition {
-      test     = "ArnEquals"
+      test     = "ArnLike"
       variable = "aws:SourceArn"
-      values   = [aws_s3_bucket.alb_logs_access.arn]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "aws:SourceAccount"
-      values   = [data.aws_caller_identity.current.account_id]
+      values = [
+        aws_s3_bucket.alb_logs.arn,
+        aws_s3_bucket.alb_logs_access.arn
+      ]
     }
   }
 }
 
-resource "aws_sqs_queue_policy" "alb_logs_events" {
-  queue_url = aws_sqs_queue.alb_logs_events.id
-  policy    = data.aws_iam_policy_document.alb_logs_events_queue_policy.json
-}
-
-resource "time_sleep" "wait_for_sqs_policy" {
-  create_duration = "120s"
-  depends_on = [
-    aws_kms_alias.sqs_sse,
-    aws_sqs_queue.alb_logs_events,
-    aws_sqs_queue_policy.alb_logs_events
-  ]
+resource "aws_sns_topic_policy" "s3_log_events" {
+  arn    = aws_sns_topic.s3_log_events.arn
+  policy = data.aws_iam_policy_document.sns_allow_s3_publish.json
 }
 
 resource "aws_s3_bucket_notification" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
 
-  queue {
-    queue_arn     = aws_sqs_queue.alb_logs_events.arn
-    events        = ["s3:ObjectCreated:*"]
-    filter_prefix = "${var.alb_log_prefix}/"
+  topic {
+    topic_arn = aws_sns_topic.s3_log_events.arn
+    events    = ["s3:ObjectCreated:*"]
   }
 
-  depends_on = [time_sleep.wait_for_sqs_policy]
+  depends_on = [aws_sns_topic_policy.s3_log_events]
 }
 
 resource "aws_s3_bucket_notification" "alb_logs_access" {
   bucket = aws_s3_bucket.alb_logs_access.id
 
-  queue {
-    queue_arn = aws_sqs_queue.alb_logs_events.arn
+  topic {
+    topic_arn = aws_sns_topic.s3_log_events.arn
     events    = ["s3:ObjectCreated:*"]
   }
 
-  depends_on = [time_sleep.wait_for_sqs_policy]
+  depends_on = [aws_sns_topic_policy.s3_log_events]
 }
 
 # -----------------------------------------------------------
-# KMS key for CloudWatch Log Groups
+# KMS key for CloudWatch Log Groups (unchanged)
 # -----------------------------------------------------------
 resource "aws_kms_key" "cloudwatch_logs" {
   description             = "KMS key for CloudWatch Logs (${var.name_prefix})"
@@ -543,4 +450,62 @@ resource "aws_kms_key" "cloudwatch_logs" {
 resource "aws_kms_alias" "cloudwatch_logs" {
   name          = "alias/${var.name_prefix}-cloudwatch-logs"
   target_key_id = aws_kms_key.cloudwatch_logs.key_id
+}
+
+data "aws_iam_policy_document" "sns_topic_kms" {
+  # Admin control for your account (root)
+  statement {
+    sid    = "AllowAccountAdministration"
+    effect = "Allow"
+
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"]
+    }
+
+    actions   = ["kms:*"]
+    resources = ["*"]
+  }
+
+  # Allow SNS service to use this key for this account (encryption at rest)
+  statement {
+    sid    = "AllowSNSServiceUse"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["sns.amazonaws.com"]
+    }
+
+    actions = [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:DescribeKey"
+    ]
+
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+}
+
+resource "aws_kms_key" "sns_topic" {
+  description         = "KMS key for encrypting SNS topics in ${var.name_prefix}"
+  enable_key_rotation = true
+  policy              = data.aws_iam_policy_document.sns_topic_kms.json
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-sns-kms"
+  })
+}
+
+resource "aws_kms_alias" "sns_topic" {
+  name          = "alias/${var.name_prefix}-sns"
+  target_key_id = aws_kms_key.sns_topic.key_id
 }

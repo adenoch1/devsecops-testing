@@ -60,6 +60,7 @@ module "ecs" {
   private_subnet_ids = module.network.private_subnet_ids
 
   ecr_repository_url = module.ecr.repository_url
+  depends_on         = [module.logging]
 
   ecs_task_execution_role_arn = module.iam.ecs_task_execution_role_arn
   ecs_task_role_arn           = module.iam.ecs_task_role_arn
@@ -72,7 +73,7 @@ module "ecs" {
   task_memory   = var.task_memory
 
   acm_certificate_arn         = var.acm_certificate_arn
-  alb_log_bucket_name         = module.logging.alb_logs_bucket_name
+  alb_log_bucket_name         = module.logging.alb_log_bucket_name
   alb_log_prefix              = var.alb_log_prefix
   cloudwatch_logs_kms_key_arn = module.logging.cloudwatch_logs_kms_key_arn
   log_retention_days          = var.log_retention_days
