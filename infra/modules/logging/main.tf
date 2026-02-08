@@ -1,10 +1,10 @@
 data "aws_caller_identity" "current" {}
 
 locals {
-  log_bucket_name        = "${var.name_prefix}-${data.aws_caller_identity.current.account_id}-alb-logs"
-  log_access_bucket_name = "${var.name_prefix}-${data.aws_caller_identity.current.account_id}-alb-logs-access"
-  log_audit_bucket_name         = "${var.name_prefix}-${data.aws_caller_identity.current.account_id}-alb-logs-audit"
-  log_audit_access_bucket_name  = "${var.name_prefix}-${data.aws_caller_identity.current.account_id}-alb-logs-audit-access"
+  log_bucket_name              = "${var.name_prefix}-${data.aws_caller_identity.current.account_id}-alb-logs"
+  log_access_bucket_name       = "${var.name_prefix}-${data.aws_caller_identity.current.account_id}-alb-logs-access"
+  log_audit_bucket_name        = "${var.name_prefix}-${data.aws_caller_identity.current.account_id}-alb-logs-audit"
+  log_audit_access_bucket_name = "${var.name_prefix}-${data.aws_caller_identity.current.account_id}-alb-logs-audit-access"
 }
 
 # -------------------------------------------------------------
