@@ -20,7 +20,7 @@ output "account_id" {
 }
 
 output "region" {
-  value       = data.aws_region.current.name
+  value       = data.aws_region.current.id
   description = "AWS region (sanity check for CI/OIDC)"
 }
 
@@ -34,7 +34,6 @@ module "logging" {
     aws.replica = aws.replica
   }
 
-  # Required by modules/logging
   aws_region = var.aws_region
 
   alb_log_prefix = var.alb_log_prefix
@@ -88,9 +87,7 @@ module "ecs" {
 
   desired_count = var.desired_count
   task_cpu      = var.task_cpu
-  task_memory   = var.task_task_memory != null ? var.task_task_memory : var.task_memory
-  # If you do NOT have var.task_task_memory anywhere, delete the line above and keep the next line instead:
-  # task_memory = var.task_memory
+  task_memory   = var.task_memory
 
   acm_certificate_arn         = var.acm_certificate_arn
   alb_log_bucket_name         = module.logging.alb_log_bucket_name
