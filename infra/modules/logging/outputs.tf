@@ -8,11 +8,6 @@ output "alb_log_access_bucket_name" {
   value       = aws_s3_bucket.alb_logs_access.bucket
 }
 
-output "alb_logs_events_queue_arn" {
-  description = "SQS queue ARN that receives S3 event notifications for the log buckets"
-  value       = aws_sqs_queue.alb_logs_events.arn
-}
-
 output "cloudwatch_logs_kms_key_arn" {
   description = "KMS CMK ARN for CloudWatch Log Groups encryption"
   value       = aws_kms_key.cloudwatch_logs.arn
