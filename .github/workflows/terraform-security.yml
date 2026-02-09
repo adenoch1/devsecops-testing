@@ -163,9 +163,9 @@ jobs:
       - name: Terraform show (json)
         run: terraform show -json tfplan.binary > tfplan.json
 
-      # ------------------------------------------------------------
+      # ----------------------------------------------------------
       # Conftest (OPA policy gate)
-      # ------------------------------------------------------------
+      # -----------------------------------------------------------
       - name: Install Conftest
         working-directory: .
         shell: bash
