@@ -48,7 +48,7 @@ jobs:
   # Gate 1 (DEV): Bootstrap Infra (safe even before image)
   # - Creates ECR/VPC/ALB/etc
   # - Keeps ECS desired_count=0 to avoid image-pull failures
-  #######################################################
+  ########################################################
   infra_bootstrap:
     name: Gate 1 — Infra Bootstrap (dev)
     if: ${{ github.event_name == 'push' || inputs.action == 'deploy' }}
