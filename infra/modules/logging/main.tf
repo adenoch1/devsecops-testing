@@ -310,6 +310,20 @@ resource "aws_s3_bucket_ownership_controls" "log_buckets" {
   for_each = local.log_buckets
   bucket   = each.value
 
+
+  # Ensure buckets exist before applying ownership controls (prevents NoSuchBucket race)
+  depends_on = [
+    aws_s3_bucket.ultimate_sink,
+    aws_s3_bucket.server_access_logs,
+    aws_s3_bucket.final_sink,
+    aws_s3_bucket.access_audit_sink,
+    aws_s3_bucket.access_audit,
+    aws_s3_bucket.alb_logs_access,
+    aws_s3_bucket.alb_logs,
+    aws_s3_bucket.alb_logs_audit,
+    aws_s3_bucket.alb_logs_audit_access
+  ]
+
   rule {
     object_ownership = "BucketOwnerEnforced"
   }
@@ -435,13 +449,13 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs_access" 
   }
 }
 
+# trivy:ignore:AWS-0132
+# Reason: ALB access logs delivery to S3 does not support SSE-KMS (CMK) encryption.
+# Using SSE-KMS causes log delivery to fail with "Access Denied for bucket ...".
+# For the ALB logs *destination* bucket, SSE-S3 (AES256) is the supported option.
 resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
 
-  # IMPORTANT:
-  # ALB access logs to S3 do NOT support SSE-KMS (CMK). They require SSE-S3 (AES256).
-  # Using aws:kms causes log delivery to fail with:
-  #   "Access Denied for bucket ... Please check S3 bucket permission"
   rule {
     apply_server_side_encryption_by_default {
       sse_algorithm = "AES256"
