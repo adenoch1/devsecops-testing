@@ -210,6 +210,7 @@ resource "aws_s3_bucket" "alb_logs_access" {
   tags          = merge(var.tags, { Name = local.log_access_bucket_name })
 }
 
+# checkov:skip=CKV_AWS_145: ALB access log destination bucket must use SSE-S3 (AES256); SSE-KMS breaks ALB log delivery.
 resource "aws_s3_bucket" "alb_logs" {
   bucket        = local.log_bucket_name
   force_destroy = true
@@ -448,7 +449,10 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs_access" 
   }
 }
 
-# SSE-KMS for ALB logs bucket (required to satisfy CKV_AWS_145)
+# trivy:ignore:AWS-0132
+# Reason: ALB access logs delivery to S3 does not support SSE-KMS (CMK) encryption.
+# Using SSE-KMS causes log delivery to fail with "Access Denied for bucket ...".
+# For the ALB logs *destination* bucket, SSE-S3 (AES256) is the supported option.
 resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
 
@@ -750,9 +754,13 @@ data "aws_iam_policy_document" "alb_logs_bucket_policy" {
     effect    = "Allow"
     actions   = ["s3:GetBucketAcl", "s3:ListBucket"]
     resources = [aws_s3_bucket.alb_logs.arn]
+
     principals {
       type        = "Service"
-      identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
+      identifiers = [
+        "logdelivery.elasticloadbalancing.amazonaws.com",
+        "elasticloadbalancing.amazonaws.com"
+      ]
     }
   }
 
@@ -763,9 +771,20 @@ data "aws_iam_policy_document" "alb_logs_bucket_policy" {
     resources = [
       "${aws_s3_bucket.alb_logs.arn}/${local.alb_log_key_prefix}"
     ]
+
     principals {
       type        = "Service"
-      identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
+      identifiers = [
+        "logdelivery.elasticloadbalancing.amazonaws.com",
+        "elasticloadbalancing.amazonaws.com"
+      ]
+    }
+
+    # ALB log delivery uses bucket-owner-full-control ACL.
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-acl"
+      values   = ["bucket-owner-full-control"]
     }
   }
 }
