@@ -29,9 +29,15 @@ jobs:
         working-directory: infra/envs/dev
 
     steps:
+      # ------------------------------------------------------------
+      # Checkout
+      # ------------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ------------------------------------------------------------
+      # AWS OIDC Auth
+      # ------------------------------------------------------------
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -39,11 +45,17 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           audience: sts.amazonaws.com
 
+      # ------------------------------------------------------------
+      # Terraform Setup
+      # ------------------------------------------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
+      # ------------------------------------------------------------
+      # Terraform fmt (repo-wide)
+      # ------------------------------------------------------------
       - name: Terraform fmt (check)
         working-directory: .
         shell: bash
@@ -57,25 +69,27 @@ jobs:
           echo "Running: terraform fmt -check -recursive ${targets[*]}"
           terraform fmt -check -recursive "${targets[@]}"
 
+      # ------------------------------------------------------------
+      # Terraform init + validate
+      # ------------------------------------------------------------
       - name: Terraform init
         run: terraform init -input=false -reconfigure
 
       - name: Terraform validate
         run: terraform validate
 
-      # -----------------------------
-      # Ensure tfvars exists (used by plan)
-      # -----------------------------
+      # ------------------------------------------------------------
+      # Ensure tfvars exists (CI-safe)
+      # ------------------------------------------------------------
       - name: Ensure tfvars exists for plan
         shell: bash
         run: |
           set -euo pipefail
 
           if [ -f terraform.tfvars ]; then
-            echo "Found terraform.tfvars in $(pwd)"
-            ls -la terraform.tfvars
+            echo "Found terraform.tfvars"
           else
-            echo "terraform.tfvars not found in $(pwd). Creating .ci.auto.tfvars for CI plan..."
+            echo "terraform.tfvars missing — creating .ci.auto.tfvars"
             {
               echo 'aws_region  = "ca-central-1"'
               echo 'project     = "devsecops-testing"'
@@ -92,13 +106,11 @@ jobs:
               echo ''
               echo 'health_check_path = "/health"'
             } > .ci.auto.tfvars
-
-            ls -la .ci.auto.tfvars
           fi
 
-      # -----------------------------
-      # Trivy (IaC scan) - run from repo root
-      # -----------------------------
+      # ------------------------------------------------------------
+      # Trivy (IaC / Terraform) – tfsec replacement
+      # ------------------------------------------------------------
       - name: Install Trivy
         working-directory: .
         shell: bash
@@ -115,12 +127,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          trivy config --severity HIGH,CRITICAL --exit-code 1 --no-progress infra
 
-      # -----------------------------
+          TFVARS="infra/envs/dev/terraform.tfvars"
+          if [ -f "$TFVARS" ]; then
+            trivy config --quiet --severity HIGH,CRITICAL --exit-code 1 --tf-vars "$TFVARS" infra
+          else
+            trivy config --quiet --severity HIGH,CRITICAL --exit-code 1 infra
+          fi
+
+      # ------------------------------------------------------------
       # Checkov (IaC policy scan)
-      # Scan repo root so modules are included
-      # -----------------------------
+      # ------------------------------------------------------------
       - name: Checkov (IaC policy scan)
         uses: bridgecrewio/checkov-action@v12
         with:
@@ -130,9 +147,9 @@ jobs:
           soft_fail: false
           skip_check: CKV2_AWS_76,CKV_AWS_109,CKV_AWS_111,CKV_AWS_356,CKV_AWS_144
 
-      # -----------------------------
-      # Plan + Conftest OPA Gate
-      # -----------------------------
+      # ------------------------------------------------------------
+      # Terraform plan
+      # ------------------------------------------------------------
       - name: Terraform plan
         shell: bash
         run: |
@@ -146,6 +163,9 @@ jobs:
       - name: Terraform show (json)
         run: terraform show -json tfplan.binary > tfplan.json
 
+      # ------------------------------------------------------------
+      # Conftest (OPA policy gate)
+      # ------------------------------------------------------------
       - name: Install Conftest
         working-directory: .
         shell: bash
