@@ -211,7 +211,6 @@ resource "aws_s3_bucket" "alb_logs_access" {
 }
 
 # checkov:skip=CKV_AWS_145: ALB access log destination bucket must use SSE-S3 (AES256); SSE-KMS breaks ALB log delivery.
-#checkov:skip=CKV_AWS_145: ALB access-logs destination bucket cannot use SSE-KMS; AWS supports SSE-S3 (AES256) for delivery.
 resource "aws_s3_bucket" "alb_logs" {
   bucket        = local.log_bucket_name
   force_destroy = true
@@ -770,13 +769,6 @@ data "aws_iam_policy_document" "alb_logs_bucket_policy" {
     principals {
       type        = "Service"
       identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
-    }
-
-    # ALB log delivery writes objects with this ACL so the bucket owner owns the logs.
-    condition {
-      test     = "StringEquals"
-      variable = "s3:x-amz-acl"
-      values   = ["bucket-owner-full-control"]
     }
   }
 }
