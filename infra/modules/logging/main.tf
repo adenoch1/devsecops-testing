@@ -674,7 +674,7 @@ resource "aws_sns_topic_policy" "s3_events" {
   policy = data.aws_iam_policy_document.sns_topic_policy.json
 }
 
-# ------------------------------------------------------------
+# --------------------------------------------------------------
 # Bucket Notifications (Checkov CKV2_AWS_62)
 # IMPORTANT: depends_on ensures topic policy exists before S3 validates destination
 # ------------------------------------------------------------
