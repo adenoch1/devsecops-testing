@@ -17,6 +17,17 @@ locals {
   final_sink_bucket_name = "${var.name_prefix}-alb-final-sink-${local.account_id}"
 
   alb_log_key_prefix = var.alb_log_prefix != "" ? "${var.alb_log_prefix}/AWSLogs/${local.account_id}/*" : "AWSLogs/${local.account_id}/*"
+
+  # Used for ownership controls loop
+  log_buckets = {
+    final_sink            = local.final_sink_bucket_name
+    access_audit_sink     = local.access_audit_sink_bucket_name
+    access_audit          = local.access_audit_bucket_name
+    alb_logs_access       = local.log_access_bucket_name
+    alb_logs              = local.log_bucket_name
+    alb_logs_audit        = local.log_audit_bucket_name
+    alb_logs_audit_access = local.log_audit_access_bucket_name
+  }
 }
 
 # ------------------------------------------------------------
@@ -106,6 +117,7 @@ resource "aws_kms_key" "sns" {
   deletion_window_in_days = 10
   enable_key_rotation     = true
 
+  # IMPORTANT: SNS needs Encrypt as well (S3 notification validation can fail without it)
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -117,13 +129,13 @@ resource "aws_kms_key" "sns" {
         Resource  = "*"
       },
       {
-        Sid    = "AllowSNSUseOfKey"
-        Effect = "Allow"
-        Principal = {
-          Service = "sns.amazonaws.com"
-        }
+        Sid       = "AllowSNSUseOfKey"
+        Effect    = "Allow"
+        Principal = { Service = "sns.amazonaws.com" }
         Action = [
+          "kms:Encrypt",
           "kms:Decrypt",
+          "kms:ReEncrypt*",
           "kms:GenerateDataKey*",
           "kms:DescribeKey"
         ]
@@ -147,29 +159,6 @@ resource "aws_sns_topic" "s3_events" {
   name              = "${var.name_prefix}-s3-events"
   kms_master_key_id = aws_kms_key.sns.arn
   tags              = merge(var.tags, { Name = "${var.name_prefix}-s3-events" })
-}
-
-data "aws_iam_policy_document" "sns_topic_policy" {
-  statement {
-    sid       = "AllowS3Publish"
-    effect    = "Allow"
-    actions   = ["SNS:Publish"]
-    resources = [aws_sns_topic.s3_events.arn]
-    principals {
-      type        = "Service"
-      identifiers = ["s3.amazonaws.com"]
-    }
-    condition {
-      test     = "StringEquals"
-      variable = "AWS:SourceAccount"
-      values   = [local.account_id]
-    }
-  }
-}
-
-resource "aws_sns_topic_policy" "s3_events" {
-  arn    = aws_sns_topic.s3_events.arn
-  policy = data.aws_iam_policy_document.sns_topic_policy.json
 }
 
 # ------------------------------------------------------------
@@ -279,18 +268,6 @@ resource "aws_s3_bucket_public_access_block" "alb_logs_audit_access" {
 # ------------------------------------------------------------
 # Ownership controls (disable ACLs)
 # ------------------------------------------------------------
-locals {
-  log_buckets = {
-    final_sink            = aws_s3_bucket.final_sink.id
-    access_audit_sink     = aws_s3_bucket.access_audit_sink.id
-    access_audit          = aws_s3_bucket.access_audit.id
-    alb_logs_access       = aws_s3_bucket.alb_logs_access.id
-    alb_logs              = aws_s3_bucket.alb_logs.id
-    alb_logs_audit        = aws_s3_bucket.alb_logs_audit.id
-    alb_logs_audit_access = aws_s3_bucket.alb_logs_audit_access.id
-  }
-}
-
 resource "aws_s3_bucket_ownership_controls" "log_buckets" {
   for_each = local.log_buckets
   bucket   = each.value
@@ -417,6 +394,10 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs_audit_ac
     }
   }
 }
+
+# ------------------------------------------------------------
+# Lifecycle (CKV2_AWS_61)
+# ------------------------------------------------------------
 resource "aws_s3_bucket_lifecycle_configuration" "final_sink" {
   bucket = aws_s3_bucket.final_sink.id
 
@@ -426,17 +407,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "final_sink" {
 
     filter { prefix = "" }
 
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
-    }
+    abort_incomplete_multipart_upload { days_after_initiation = 7 }
 
-    expiration {
-      days = var.lifecycle_expire_days
-    }
+    expiration { days = var.lifecycle_expire_days }
 
-    noncurrent_version_expiration {
-      noncurrent_days = var.lifecycle_expire_days
-    }
+    noncurrent_version_expiration { noncurrent_days = var.lifecycle_expire_days }
 
     transition {
       days          = var.lifecycle_glacier_days
@@ -454,17 +429,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "access_audit_sink" {
 
     filter { prefix = "" }
 
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
-    }
+    abort_incomplete_multipart_upload { days_after_initiation = 7 }
 
-    expiration {
-      days = var.lifecycle_expire_days
-    }
+    expiration { days = var.lifecycle_expire_days }
 
-    noncurrent_version_expiration {
-      noncurrent_days = var.lifecycle_expire_days
-    }
+    noncurrent_version_expiration { noncurrent_days = var.lifecycle_expire_days }
 
     transition {
       days          = var.lifecycle_glacier_days
@@ -482,17 +451,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "access_audit" {
 
     filter { prefix = "" }
 
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
-    }
+    abort_incomplete_multipart_upload { days_after_initiation = 7 }
 
-    expiration {
-      days = var.lifecycle_expire_days
-    }
+    expiration { days = var.lifecycle_expire_days }
 
-    noncurrent_version_expiration {
-      noncurrent_days = var.lifecycle_expire_days
-    }
+    noncurrent_version_expiration { noncurrent_days = var.lifecycle_expire_days }
 
     transition {
       days          = var.lifecycle_glacier_days
@@ -510,17 +473,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
 
     filter { prefix = "" }
 
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
-    }
+    abort_incomplete_multipart_upload { days_after_initiation = 7 }
 
-    expiration {
-      days = var.lifecycle_expire_days
-    }
+    expiration { days = var.lifecycle_expire_days }
 
-    noncurrent_version_expiration {
-      noncurrent_days = var.lifecycle_expire_days
-    }
+    noncurrent_version_expiration { noncurrent_days = var.lifecycle_expire_days }
 
     transition {
       days          = var.lifecycle_glacier_days
@@ -538,17 +495,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
 
     filter { prefix = "" }
 
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
-    }
+    abort_incomplete_multipart_upload { days_after_initiation = 7 }
 
-    expiration {
-      days = var.lifecycle_expire_days
-    }
+    expiration { days = var.lifecycle_expire_days }
 
-    noncurrent_version_expiration {
-      noncurrent_days = var.lifecycle_expire_days
-    }
+    noncurrent_version_expiration { noncurrent_days = var.lifecycle_expire_days }
 
     transition {
       days          = var.lifecycle_glacier_days
@@ -566,17 +517,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_audit" {
 
     filter { prefix = "" }
 
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
-    }
+    abort_incomplete_multipart_upload { days_after_initiation = 7 }
 
-    expiration {
-      days = var.lifecycle_expire_days
-    }
+    expiration { days = var.lifecycle_expire_days }
 
-    noncurrent_version_expiration {
-      noncurrent_days = var.lifecycle_expire_days
-    }
+    noncurrent_version_expiration { noncurrent_days = var.lifecycle_expire_days }
 
     transition {
       days          = var.lifecycle_glacier_days
@@ -594,17 +539,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_audit_access" {
 
     filter { prefix = "" }
 
-    abort_incomplete_multipart_upload {
-      days_after_initiation = 7
-    }
+    abort_incomplete_multipart_upload { days_after_initiation = 7 }
 
-    expiration {
-      days = var.lifecycle_expire_days
-    }
+    expiration { days = var.lifecycle_expire_days }
 
-    noncurrent_version_expiration {
-      noncurrent_days = var.lifecycle_expire_days
-    }
+    noncurrent_version_expiration { noncurrent_days = var.lifecycle_expire_days }
 
     transition {
       days          = var.lifecycle_glacier_days
@@ -616,16 +555,14 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_audit_access" {
 # ------------------------------------------------------------
 # Logging chain (tfsec aws-s3-enable-bucket-logging)
 # ------------------------------------------------------------
-# final_sink has no further logging destination by design
+# NOTE: S3 does not allow target_bucket == source_bucket for server access logging in many cases.
+# If this causes issues, create a dedicated sink bucket for final_sink. For now we keep your intent.
 resource "aws_s3_bucket_logging" "final_sink" {
   bucket        = aws_s3_bucket.final_sink.id
   target_bucket = aws_s3_bucket.final_sink.id
   target_prefix = "${var.alb_log_prefix}/final-sink/"
-  # NOTE: Some scanners accept this as "logging enabled". If yours complains,
-  # we can create a truly separate "final-final" bucket; but typically unnecessary.
 }
 
-# access_audit_sink logs to final_sink
 resource "aws_s3_bucket_logging" "access_audit_sink" {
   bucket        = aws_s3_bucket.access_audit_sink.id
   target_bucket = aws_s3_bucket.final_sink.id
@@ -695,60 +632,125 @@ resource "aws_s3_bucket_policy" "alb_logs" {
 }
 
 # ------------------------------------------------------------
+# SNS Topic Policy (FIX for S3 notification validation)
+# - Requires aws:SourceArn for each bucket that will publish
+# ------------------------------------------------------------
+data "aws_iam_policy_document" "sns_topic_policy" {
+  statement {
+    sid       = "AllowS3PublishFromLogBuckets"
+    effect    = "Allow"
+    actions   = ["SNS:Publish"]
+    resources = [aws_sns_topic.s3_events.arn]
+
+    principals {
+      type        = "Service"
+      identifiers = ["s3.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "AWS:SourceAccount"
+      values   = [local.account_id]
+    }
+
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values = [
+        aws_s3_bucket.final_sink.arn,
+        aws_s3_bucket.access_audit_sink.arn,
+        aws_s3_bucket.access_audit.arn,
+        aws_s3_bucket.alb_logs_access.arn,
+        aws_s3_bucket.alb_logs.arn,
+        aws_s3_bucket.alb_logs_audit.arn,
+        aws_s3_bucket.alb_logs_audit_access.arn
+      ]
+    }
+  }
+}
+
+resource "aws_sns_topic_policy" "s3_events" {
+  arn    = aws_sns_topic.s3_events.arn
+  policy = data.aws_iam_policy_document.sns_topic_policy.json
+}
+
+# ------------------------------------------------------------
 # Bucket Notifications (Checkov CKV2_AWS_62)
+# IMPORTANT: depends_on ensures topic policy exists before S3 validates destination
 # ------------------------------------------------------------
 resource "aws_s3_bucket_notification" "final_sink" {
   bucket = aws_s3_bucket.final_sink.id
+
   topic {
     topic_arn = aws_sns_topic.s3_events.arn
     events    = ["s3:ObjectCreated:*"]
   }
+
+  depends_on = [aws_sns_topic_policy.s3_events]
 }
 
 resource "aws_s3_bucket_notification" "access_audit_sink" {
   bucket = aws_s3_bucket.access_audit_sink.id
+
   topic {
     topic_arn = aws_sns_topic.s3_events.arn
     events    = ["s3:ObjectCreated:*"]
   }
+
+  depends_on = [aws_sns_topic_policy.s3_events]
 }
 
 resource "aws_s3_bucket_notification" "access_audit" {
   bucket = aws_s3_bucket.access_audit.id
+
   topic {
     topic_arn = aws_sns_topic.s3_events.arn
     events    = ["s3:ObjectCreated:*"]
   }
+
+  depends_on = [aws_sns_topic_policy.s3_events]
 }
 
 resource "aws_s3_bucket_notification" "alb_logs_access" {
   bucket = aws_s3_bucket.alb_logs_access.id
+
   topic {
     topic_arn = aws_sns_topic.s3_events.arn
     events    = ["s3:ObjectCreated:*"]
   }
+
+  depends_on = [aws_sns_topic_policy.s3_events]
 }
 
 resource "aws_s3_bucket_notification" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
+
   topic {
     topic_arn = aws_sns_topic.s3_events.arn
     events    = ["s3:ObjectCreated:*"]
   }
+
+  depends_on = [aws_sns_topic_policy.s3_events]
 }
 
 resource "aws_s3_bucket_notification" "alb_logs_audit" {
   bucket = aws_s3_bucket.alb_logs_audit.id
+
   topic {
     topic_arn = aws_sns_topic.s3_events.arn
     events    = ["s3:ObjectCreated:*"]
   }
+
+  depends_on = [aws_sns_topic_policy.s3_events]
 }
 
 resource "aws_s3_bucket_notification" "alb_logs_audit_access" {
   bucket = aws_s3_bucket.alb_logs_audit_access.id
+
   topic {
     topic_arn = aws_sns_topic.s3_events.arn
     events    = ["s3:ObjectCreated:*"]
   }
+
+  depends_on = [aws_sns_topic_policy.s3_events]
 }
