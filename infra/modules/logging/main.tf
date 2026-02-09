@@ -5,21 +5,31 @@ locals {
   account_id = data.aws_caller_identity.current.account_id
   region     = data.aws_region.current.id
 
+  # ALB log buckets
   log_bucket_name              = "${var.name_prefix}-alb-logs-${local.account_id}"
   log_access_bucket_name       = "${var.name_prefix}-alb-logs-access-${local.account_id}"
   log_audit_bucket_name        = "${var.name_prefix}-alb-audit-logs-${local.account_id}"
   log_audit_access_bucket_name = "${var.name_prefix}-alb-audit-logs-access-${local.account_id}"
 
+  # Access audit buckets
   access_audit_bucket_name      = "${var.name_prefix}-alb-access-audit-${local.account_id}"
   access_audit_sink_bucket_name = "${var.name_prefix}-alb-access-audit-sink-${local.account_id}"
 
-  # FINAL sink bucket so the sink bucket itself has logging enabled (tfsec aws-s3-enable-bucket-logging)
+  # "final sink" (as you designed)
   final_sink_bucket_name = "${var.name_prefix}-alb-final-sink-${local.account_id}"
 
+  # PRODUCTION-GRADE FIX:
+  # Dedicated buckets for S3 server access logging (avoid source==target logging)
+  server_access_logs_bucket_name = "${var.name_prefix}-s3-server-access-logs-${local.account_id}"
+  ultimate_sink_bucket_name      = "${var.name_prefix}-s3-ultimate-sink-${local.account_id}"
+
+  # ALB access log object prefix pattern
   alb_log_key_prefix = var.alb_log_prefix != "" ? "${var.alb_log_prefix}/AWSLogs/${local.account_id}/*" : "AWSLogs/${local.account_id}/*"
 
-  # Used for ownership controls loop
+  # Used for ownership controls loop (bucket names)
   log_buckets = {
+    ultimate_sink         = local.ultimate_sink_bucket_name
+    server_access_logs    = local.server_access_logs_bucket_name
     final_sink            = local.final_sink_bucket_name
     access_audit_sink     = local.access_audit_sink_bucket_name
     access_audit          = local.access_audit_bucket_name
@@ -164,6 +174,18 @@ resource "aws_sns_topic" "s3_events" {
 # ------------------------------------------------------------
 # Buckets
 # ------------------------------------------------------------
+resource "aws_s3_bucket" "ultimate_sink" {
+  bucket        = local.ultimate_sink_bucket_name
+  force_destroy = true
+  tags          = merge(var.tags, { Name = local.ultimate_sink_bucket_name })
+}
+
+resource "aws_s3_bucket" "server_access_logs" {
+  bucket        = local.server_access_logs_bucket_name
+  force_destroy = true
+  tags          = merge(var.tags, { Name = local.server_access_logs_bucket_name })
+}
+
 resource "aws_s3_bucket" "final_sink" {
   bucket        = local.final_sink_bucket_name
   force_destroy = true
@@ -209,6 +231,22 @@ resource "aws_s3_bucket" "alb_logs_audit_access" {
 # ------------------------------------------------------------
 # Public access blocks
 # ------------------------------------------------------------
+resource "aws_s3_bucket_public_access_block" "ultimate_sink" {
+  bucket                  = aws_s3_bucket.ultimate_sink.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_public_access_block" "server_access_logs" {
+  bucket                  = aws_s3_bucket.server_access_logs.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
 resource "aws_s3_bucket_public_access_block" "final_sink" {
   bucket                  = aws_s3_bucket.final_sink.id
   block_public_acls       = true
@@ -280,6 +318,18 @@ resource "aws_s3_bucket_ownership_controls" "log_buckets" {
 # ------------------------------------------------------------
 # Versioning
 # ------------------------------------------------------------
+resource "aws_s3_bucket_versioning" "ultimate_sink" {
+  bucket = aws_s3_bucket.ultimate_sink.id
+  versioning_configuration { status = "Enabled" }
+  depends_on = [aws_s3_bucket_ownership_controls.log_buckets]
+}
+
+resource "aws_s3_bucket_versioning" "server_access_logs" {
+  bucket = aws_s3_bucket.server_access_logs.id
+  versioning_configuration { status = "Enabled" }
+  depends_on = [aws_s3_bucket_ownership_controls.log_buckets]
+}
+
 resource "aws_s3_bucket_versioning" "final_sink" {
   bucket = aws_s3_bucket.final_sink.id
   versioning_configuration { status = "Enabled" }
@@ -325,6 +375,26 @@ resource "aws_s3_bucket_versioning" "alb_logs_audit_access" {
 # ------------------------------------------------------------
 # SSE-KMS
 # ------------------------------------------------------------
+resource "aws_s3_bucket_server_side_encryption_configuration" "ultimate_sink" {
+  bucket = aws_s3_bucket.ultimate_sink.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.alb_logs.arn
+    }
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "server_access_logs" {
+  bucket = aws_s3_bucket.server_access_logs.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.alb_logs.arn
+    }
+  }
+}
+
 resource "aws_s3_bucket_server_side_encryption_configuration" "final_sink" {
   bucket = aws_s3_bucket.final_sink.id
   rule {
@@ -398,6 +468,50 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs_audit_ac
 # ------------------------------------------------------------
 # Lifecycle (CKV2_AWS_61)
 # ------------------------------------------------------------
+resource "aws_s3_bucket_lifecycle_configuration" "ultimate_sink" {
+  bucket = aws_s3_bucket.ultimate_sink.id
+
+  rule {
+    id     = "lifecycle"
+    status = "Enabled"
+
+    filter { prefix = "" }
+
+    abort_incomplete_multipart_upload { days_after_initiation = 7 }
+
+    expiration { days = var.lifecycle_expire_days }
+
+    noncurrent_version_expiration { noncurrent_days = var.lifecycle_expire_days }
+
+    transition {
+      days          = var.lifecycle_glacier_days
+      storage_class = "GLACIER"
+    }
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "server_access_logs" {
+  bucket = aws_s3_bucket.server_access_logs.id
+
+  rule {
+    id     = "lifecycle"
+    status = "Enabled"
+
+    filter { prefix = "" }
+
+    abort_incomplete_multipart_upload { days_after_initiation = 7 }
+
+    expiration { days = var.lifecycle_expire_days }
+
+    noncurrent_version_expiration { noncurrent_days = var.lifecycle_expire_days }
+
+    transition {
+      days          = var.lifecycle_glacier_days
+      storage_class = "GLACIER"
+    }
+  }
+}
+
 resource "aws_s3_bucket_lifecycle_configuration" "final_sink" {
   bucket = aws_s3_bucket.final_sink.id
 
@@ -554,45 +668,58 @@ resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_audit_access" {
 
 # ------------------------------------------------------------
 # Logging chain (tfsec aws-s3-enable-bucket-logging)
+# PRODUCTION-GRADE: no bucket logs to itself
 # ------------------------------------------------------------
-# NOTE: S3 does not allow target_bucket == source_bucket for server access logging in many cases.
-# If this causes issues, create a dedicated sink bucket for final_sink. For now we keep your intent.
+# server_access_logs -> ultimate_sink
+resource "aws_s3_bucket_logging" "server_access_logs" {
+  bucket        = aws_s3_bucket.server_access_logs.id
+  target_bucket = aws_s3_bucket.ultimate_sink.id
+  target_prefix = "${var.alb_log_prefix}/server-access-logs/"
+}
+
+# final_sink -> server_access_logs
 resource "aws_s3_bucket_logging" "final_sink" {
   bucket        = aws_s3_bucket.final_sink.id
-  target_bucket = aws_s3_bucket.final_sink.id
+  target_bucket = aws_s3_bucket.server_access_logs.id
   target_prefix = "${var.alb_log_prefix}/final-sink/"
 }
 
+# access_audit_sink -> final_sink
 resource "aws_s3_bucket_logging" "access_audit_sink" {
   bucket        = aws_s3_bucket.access_audit_sink.id
   target_bucket = aws_s3_bucket.final_sink.id
   target_prefix = "${var.alb_log_prefix}/access-audit-sink/"
 }
 
+# access_audit -> access_audit_sink
 resource "aws_s3_bucket_logging" "access_audit" {
   bucket        = aws_s3_bucket.access_audit.id
   target_bucket = aws_s3_bucket.access_audit_sink.id
   target_prefix = "${var.alb_log_prefix}/access-audit/"
 }
 
+# alb_logs_access -> access_audit
 resource "aws_s3_bucket_logging" "alb_logs_access" {
   bucket        = aws_s3_bucket.alb_logs_access.id
   target_bucket = aws_s3_bucket.access_audit.id
   target_prefix = "${var.alb_log_prefix}/access-bucket/"
 }
 
+# alb_logs -> alb_logs_access
 resource "aws_s3_bucket_logging" "alb_logs" {
   bucket        = aws_s3_bucket.alb_logs.id
   target_bucket = aws_s3_bucket.alb_logs_access.id
   target_prefix = "${var.alb_log_prefix}/"
 }
 
+# alb_logs_audit -> alb_logs_audit_access
 resource "aws_s3_bucket_logging" "alb_logs_audit" {
   bucket        = aws_s3_bucket.alb_logs_audit.id
   target_bucket = aws_s3_bucket.alb_logs_audit_access.id
   target_prefix = "${var.alb_log_prefix}/audit/"
 }
 
+# alb_logs_audit_access -> access_audit
 resource "aws_s3_bucket_logging" "alb_logs_audit_access" {
   bucket        = aws_s3_bucket.alb_logs_audit_access.id
   target_bucket = aws_s3_bucket.access_audit.id
@@ -615,10 +742,12 @@ data "aws_iam_policy_document" "alb_logs_bucket_policy" {
   }
 
   statement {
-    sid       = "AWSLogDeliveryWrite"
-    effect    = "Allow"
-    actions   = ["s3:PutObject"]
-    resources = ["${aws_s3_bucket.alb_logs.arn}/${local.alb_log_key_prefix}"]
+    sid     = "AWSLogDeliveryWrite"
+    effect  = "Allow"
+    actions = ["s3:PutObject"]
+    resources = [
+      "${aws_s3_bucket.alb_logs.arn}/${local.alb_log_key_prefix}"
+    ]
     principals {
       type        = "Service"
       identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
@@ -657,6 +786,8 @@ data "aws_iam_policy_document" "sns_topic_policy" {
       test     = "ArnLike"
       variable = "aws:SourceArn"
       values = [
+        aws_s3_bucket.ultimate_sink.arn,
+        aws_s3_bucket.server_access_logs.arn,
         aws_s3_bucket.final_sink.arn,
         aws_s3_bucket.access_audit_sink.arn,
         aws_s3_bucket.access_audit.arn,
@@ -674,10 +805,32 @@ resource "aws_sns_topic_policy" "s3_events" {
   policy = data.aws_iam_policy_document.sns_topic_policy.json
 }
 
-# --------------------------------------------------------------
+# ------------------------------------------------------------
 # Bucket Notifications (Checkov CKV2_AWS_62)
 # IMPORTANT: depends_on ensures topic policy exists before S3 validates destination
 # ------------------------------------------------------------
+resource "aws_s3_bucket_notification" "ultimate_sink" {
+  bucket = aws_s3_bucket.ultimate_sink.id
+
+  topic {
+    topic_arn = aws_sns_topic.s3_events.arn
+    events    = ["s3:ObjectCreated:*"]
+  }
+
+  depends_on = [aws_sns_topic_policy.s3_events]
+}
+
+resource "aws_s3_bucket_notification" "server_access_logs" {
+  bucket = aws_s3_bucket.server_access_logs.id
+
+  topic {
+    topic_arn = aws_sns_topic.s3_events.arn
+    events    = ["s3:ObjectCreated:*"]
+  }
+
+  depends_on = [aws_sns_topic_policy.s3_events]
+}
+
 resource "aws_s3_bucket_notification" "final_sink" {
   bucket = aws_s3_bucket.final_sink.id
 
