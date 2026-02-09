@@ -151,9 +151,9 @@ resource "aws_sns_topic" "s3_events" {
 
 data "aws_iam_policy_document" "sns_topic_policy" {
   statement {
-    sid     = "AllowS3Publish"
-    effect  = "Allow"
-    actions = ["SNS:Publish"]
+    sid       = "AllowS3Publish"
+    effect    = "Allow"
+    actions   = ["SNS:Publish"]
     resources = [aws_sns_topic.s3_events.arn]
     principals {
       type        = "Service"
@@ -417,98 +417,199 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs_audit_ac
     }
   }
 }
-
-# ------------------------------------------------------------
-# Lifecycle for ALL buckets (Checkov CKV2_AWS_61)
-# ------------------------------------------------------------
 resource "aws_s3_bucket_lifecycle_configuration" "final_sink" {
   bucket = aws_s3_bucket.final_sink.id
+
   rule {
     id     = "lifecycle"
     status = "Enabled"
+
     filter { prefix = "" }
-    abort_incomplete_multipart_upload { days_after_initiation = 7 }
-    expiration { days = var.lifecycle_expire_days }
-    noncurrent_version_expiration { noncurrent_days = var.lifecycle_expire_days }
-    transition { days = var.lifecycle_glacier_days storage_class = "GLACIER" }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    expiration {
+      days = var.lifecycle_expire_days
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.lifecycle_expire_days
+    }
+
+    transition {
+      days          = var.lifecycle_glacier_days
+      storage_class = "GLACIER"
+    }
   }
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "access_audit_sink" {
   bucket = aws_s3_bucket.access_audit_sink.id
+
   rule {
     id     = "lifecycle"
     status = "Enabled"
+
     filter { prefix = "" }
-    abort_incomplete_multipart_upload { days_after_initiation = 7 }
-    expiration { days = var.lifecycle_expire_days }
-    noncurrent_version_expiration { noncurrent_days = var.lifecycle_expire_days }
-    transition { days = var.lifecycle_glacier_days storage_class = "GLACIER" }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    expiration {
+      days = var.lifecycle_expire_days
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.lifecycle_expire_days
+    }
+
+    transition {
+      days          = var.lifecycle_glacier_days
+      storage_class = "GLACIER"
+    }
   }
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "access_audit" {
   bucket = aws_s3_bucket.access_audit.id
+
   rule {
     id     = "lifecycle"
     status = "Enabled"
+
     filter { prefix = "" }
-    abort_incomplete_multipart_upload { days_after_initiation = 7 }
-    expiration { days = var.lifecycle_expire_days }
-    noncurrent_version_expiration { noncurrent_days = var.lifecycle_expire_days }
-    transition { days = var.lifecycle_glacier_days storage_class = "GLACIER" }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    expiration {
+      days = var.lifecycle_expire_days
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.lifecycle_expire_days
+    }
+
+    transition {
+      days          = var.lifecycle_glacier_days
+      storage_class = "GLACIER"
+    }
   }
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_access" {
   bucket = aws_s3_bucket.alb_logs_access.id
+
   rule {
     id     = "lifecycle"
     status = "Enabled"
+
     filter { prefix = "" }
-    abort_incomplete_multipart_upload { days_after_initiation = 7 }
-    expiration { days = var.lifecycle_expire_days }
-    noncurrent_version_expiration { noncurrent_days = var.lifecycle_expire_days }
-    transition { days = var.lifecycle_glacier_days storage_class = "GLACIER" }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    expiration {
+      days = var.lifecycle_expire_days
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.lifecycle_expire_days
+    }
+
+    transition {
+      days          = var.lifecycle_glacier_days
+      storage_class = "GLACIER"
+    }
   }
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
+
   rule {
     id     = "lifecycle"
     status = "Enabled"
+
     filter { prefix = "" }
-    abort_incomplete_multipart_upload { days_after_initiation = 7 }
-    expiration { days = var.lifecycle_expire_days }
-    noncurrent_version_expiration { noncurrent_days = var.lifecycle_expire_days }
-    transition { days = var.lifecycle_glacier_days storage_class = "GLACIER" }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    expiration {
+      days = var.lifecycle_expire_days
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.lifecycle_expire_days
+    }
+
+    transition {
+      days          = var.lifecycle_glacier_days
+      storage_class = "GLACIER"
+    }
   }
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_audit" {
   bucket = aws_s3_bucket.alb_logs_audit.id
+
   rule {
     id     = "lifecycle"
     status = "Enabled"
+
     filter { prefix = "" }
-    abort_incomplete_multipart_upload { days_after_initiation = 7 }
-    expiration { days = var.lifecycle_expire_days }
-    noncurrent_version_expiration { noncurrent_days = var.lifecycle_expire_days }
-    transition { days = var.lifecycle_glacier_days storage_class = "GLACIER" }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    expiration {
+      days = var.lifecycle_expire_days
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.lifecycle_expire_days
+    }
+
+    transition {
+      days          = var.lifecycle_glacier_days
+      storage_class = "GLACIER"
+    }
   }
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "alb_logs_audit_access" {
   bucket = aws_s3_bucket.alb_logs_audit_access.id
+
   rule {
     id     = "lifecycle"
     status = "Enabled"
+
     filter { prefix = "" }
-    abort_incomplete_multipart_upload { days_after_initiation = 7 }
-    expiration { days = var.lifecycle_expire_days }
-    noncurrent_version_expiration { noncurrent_days = var.lifecycle_expire_days }
-    transition { days = var.lifecycle_glacier_days storage_class = "GLACIER" }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    expiration {
+      days = var.lifecycle_expire_days
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.lifecycle_expire_days
+    }
+
+    transition {
+      days          = var.lifecycle_glacier_days
+      storage_class = "GLACIER"
+    }
   }
 }
 
@@ -566,9 +667,9 @@ resource "aws_s3_bucket_logging" "alb_logs_audit_access" {
 # ------------------------------------------------------------
 data "aws_iam_policy_document" "alb_logs_bucket_policy" {
   statement {
-    sid     = "AWSLogDeliveryAclCheck"
-    effect  = "Allow"
-    actions = ["s3:GetBucketAcl", "s3:ListBucket"]
+    sid       = "AWSLogDeliveryAclCheck"
+    effect    = "Allow"
+    actions   = ["s3:GetBucketAcl", "s3:ListBucket"]
     resources = [aws_s3_bucket.alb_logs.arn]
     principals {
       type        = "Service"
@@ -577,9 +678,9 @@ data "aws_iam_policy_document" "alb_logs_bucket_policy" {
   }
 
   statement {
-    sid     = "AWSLogDeliveryWrite"
-    effect  = "Allow"
-    actions = ["s3:PutObject"]
+    sid       = "AWSLogDeliveryWrite"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
     resources = ["${aws_s3_bucket.alb_logs.arn}/${local.alb_log_key_prefix}"]
     principals {
       type        = "Service"

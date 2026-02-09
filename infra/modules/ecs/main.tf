@@ -362,9 +362,9 @@ resource "aws_iam_role" "firehose_waf" {
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect = "Allow"
+      Effect    = "Allow"
       Principal = { Service = "firehose.amazonaws.com" }
-      Action = "sts:AssumeRole"
+      Action    = "sts:AssumeRole"
     }]
   })
   tags = merge(var.tags, { Name = "${var.name_prefix}-firehose-waf-role" })
