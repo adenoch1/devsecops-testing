@@ -564,7 +564,9 @@ resource "aws_iam_role_policy" "firehose_waf" {
 }
 
 resource "aws_kinesis_firehose_delivery_stream" "waf" {
-  name        = "${var.name_prefix}-waf-logs"
+  # WAF logging requires the Firehose stream name to start with "aws-waf-logs-"
+  # (AWS validation fails otherwise, even if the ARN looks correct).
+  name        = "aws-waf-logs-${var.name_prefix}"
   destination = "extended_s3"
 
   server_side_encryption {
