@@ -1,4 +1,12 @@
+############################################################
+# ECS MODULE - main.tf (FULL, corrected HCL)
+# - Public ALB (HTTPS) + WAFv2 + WAF Logging (Firehose->S3)
+# - ECS Fargate service behind ALB
+# - Security groups without dependency cycles
+############################################################
+
 data "aws_region" "current" {}
+data "aws_caller_identity" "current" {}
 
 # --------------------------------
 # CloudWatch Logs (encrypted with KMS)
@@ -14,9 +22,9 @@ resource "aws_cloudwatch_log_group" "app" {
 }
 
 # -----------------------------
-# Security Groups (no cycle, prod-grade)
+# Security Groups (no cycle)
 # -----------------------------
-# ALB SG: ingress from Internet (443); egress to VPC CIDR on app_port (no SG reference => no cycle)
+# ALB SG: internet ingress 443, egress restricted to VPC CIDR on app port (breaks SG cycle)
 #tfsec:ignore:aws-ec2-no-public-ingress-sgr
 resource "aws_security_group" "alb" {
   name        = "${var.name_prefix}-alb-sg"
@@ -40,7 +48,7 @@ resource "aws_security_group" "alb" {
   }
 
   egress {
-    description = "ALB to ECS tasks on app port (VPC CIDR)"
+    description = "ALB to targets on app port within VPC CIDR"
     from_port   = var.app_port
     to_port     = var.app_port
     protocol    = "tcp"
@@ -75,7 +83,7 @@ resource "aws_security_group" "ecs" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # DNS to VPC resolver
+  # DNS to VPC resolver (UDP/TCP 53)
   egress {
     description = "DNS to VPC resolver (UDP)"
     from_port   = 53
@@ -100,6 +108,8 @@ resource "aws_security_group" "ecs" {
 # ------------------------------
 # Application Load Balancer (HTTPS enforced)
 # ------------------------------
+# NOTE: Public ALB is expected for an internet-facing app.
+# If you want scanners 100% green with no ignore, move to CloudFront (public) + internal ALB.
 #tfsec:ignore:aws-elb-alb-not-public
 resource "aws_lb" "this" {
   name               = "${var.name_prefix}-alb"
@@ -123,8 +133,42 @@ resource "aws_lb" "this" {
   })
 }
 
+resource "aws_lb_target_group" "app" {
+  name        = "${var.name_prefix}-tg"
+  port        = var.app_port
+  protocol    = "HTTP"
+  vpc_id      = var.vpc_id
+  target_type = "ip"
+
+  health_check {
+    enabled             = true
+    interval            = 30
+    path                = "/health"
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    matcher             = "200-399"
+  }
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-tg"
+  })
+}
+
+resource "aws_lb_listener" "https" {
+  load_balancer_arn = aws_lb.this.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
+  certificate_arn   = var.acm_certificate_arn
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app.arn
+  }
+}
+
 # ------------------------------
-# WAFv2 (Required by Checkov CKV2_AWS_28)
+# WAFv2 (CKV2_AWS_28)
 # ------------------------------
 resource "aws_wafv2_web_acl" "alb" {
   name        = "${var.name_prefix}-waf"
@@ -141,7 +185,6 @@ resource "aws_wafv2_web_acl" "alb" {
     sampled_requests_enabled   = true
   }
 
-  # Baseline managed rule set (good production default)
   rule {
     name     = "AWSManagedRulesCommonRuleSet"
     priority = 10
@@ -208,9 +251,7 @@ resource "aws_wafv2_web_acl" "alb" {
     }
   }
 
-  tags = merge(var.tags, {
-    Name = "${var.name_prefix}-waf"
-  })
+  tags = merge(var.tags, { Name = "${var.name_prefix}-waf" })
 }
 
 resource "aws_wafv2_web_acl_association" "alb" {
@@ -218,41 +259,347 @@ resource "aws_wafv2_web_acl_association" "alb" {
   web_acl_arn  = aws_wafv2_web_acl.alb.arn
 }
 
-resource "aws_lb_target_group" "app" {
-  name        = "${var.name_prefix}-tg"
-  port        = var.app_port
-  protocol    = "HTTP"
-  vpc_id      = var.vpc_id
-  target_type = "ip"
+# ------------------------------------------------------------
+# WAF Logging (CKV2_AWS_31) + hardening for scanners
+# WAF logs -> Kinesis Firehose -> S3
+# ------------------------------------------------------------
 
-  health_check {
-    enabled             = true
-    interval            = 30
-    path                = "/health"
-    healthy_threshold   = 2
-    unhealthy_threshold = 3
-    matcher             = "200-399"
-  }
+resource "aws_kms_key" "waf_logs" {
+  description             = "CMK for WAF logs bucket and Firehose encryption"
+  deletion_window_in_days = 10
+  enable_key_rotation     = true
 
-  tags = merge(var.tags, {
-    Name = "${var.name_prefix}-tg"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "EnableRootPermissions"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      },
+      {
+        Sid       = "AllowFirehoseUseOfKey"
+        Effect    = "Allow"
+        Principal = { Service = "firehose.amazonaws.com" }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid       = "AllowS3UseOfKey"
+        Effect    = "Allow"
+        Principal = { Service = "s3.amazonaws.com" }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+      }
+    ]
   })
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-waf-logs-kms" })
 }
 
-resource "aws_lb_listener" "https" {
-  load_balancer_arn = aws_lb.this.arn
-  port              = 443
-  protocol          = "HTTPS"
-  ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
-  certificate_arn   = var.acm_certificate_arn
+resource "aws_kms_alias" "waf_logs" {
+  name          = "alias/${var.name_prefix}-waf-logs"
+  target_key_id = aws_kms_key.waf_logs.key_id
+}
 
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.app.arn
+resource "aws_s3_bucket" "waf_logs_access" {
+  bucket        = "${var.name_prefix}-waf-logs-access-${data.aws_caller_identity.current.account_id}"
+  force_destroy = true
+  tags          = merge(var.tags, { Name = "${var.name_prefix}-waf-logs-access" })
+}
+
+resource "aws_s3_bucket_public_access_block" "waf_logs_access" {
+  bucket                  = aws_s3_bucket.waf_logs_access.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_ownership_controls" "waf_logs_access" {
+  bucket = aws_s3_bucket.waf_logs_access.id
+
+  rule {
+    object_ownership = "BucketOwnerEnforced"
   }
 }
 
-# -------------------------------------------------------------
+resource "aws_s3_bucket_versioning" "waf_logs_access" {
+  bucket = aws_s3_bucket.waf_logs_access.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+
+  depends_on = [aws_s3_bucket_ownership_controls.waf_logs_access]
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "waf_logs_access" {
+  bucket = aws_s3_bucket.waf_logs_access.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.waf_logs.arn
+    }
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "waf_logs_access" {
+  bucket = aws_s3_bucket.waf_logs_access.id
+
+  rule {
+    id     = "lifecycle"
+    status = "Enabled"
+
+    filter {
+      prefix = ""
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    expiration {
+      days = var.lifecycle_expire_days
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.lifecycle_expire_days
+    }
+
+    transition {
+      days          = var.lifecycle_glacier_days
+      storage_class = "GLACIER"
+    }
+  }
+}
+
+resource "aws_s3_bucket" "waf_logs" {
+  bucket        = "${var.name_prefix}-waf-logs-${data.aws_caller_identity.current.account_id}"
+  force_destroy = true
+  tags          = merge(var.tags, { Name = "${var.name_prefix}-waf-logs" })
+}
+
+resource "aws_s3_bucket_public_access_block" "waf_logs" {
+  bucket                  = aws_s3_bucket.waf_logs.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_ownership_controls" "waf_logs" {
+  bucket = aws_s3_bucket.waf_logs.id
+
+  rule {
+    object_ownership = "BucketOwnerEnforced"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "waf_logs" {
+  bucket = aws_s3_bucket.waf_logs.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+
+  depends_on = [aws_s3_bucket_ownership_controls.waf_logs]
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "waf_logs" {
+  bucket = aws_s3_bucket.waf_logs.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.waf_logs.arn
+    }
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "waf_logs" {
+  bucket = aws_s3_bucket.waf_logs.id
+
+  rule {
+    id     = "lifecycle"
+    status = "Enabled"
+
+    filter {
+      prefix = ""
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    expiration {
+      days = var.lifecycle_expire_days
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = var.lifecycle_expire_days
+    }
+
+    transition {
+      days          = var.lifecycle_glacier_days
+      storage_class = "GLACIER"
+    }
+  }
+}
+
+resource "aws_s3_bucket_logging" "waf_logs" {
+  bucket        = aws_s3_bucket.waf_logs.id
+  target_bucket = aws_s3_bucket.waf_logs_access.id
+  target_prefix = "waf-logs-access/"
+}
+
+resource "aws_sns_topic" "waf_bucket_events" {
+  name              = "${var.name_prefix}-waf-bucket-events"
+  kms_master_key_id = aws_kms_key.waf_logs.arn
+  tags              = merge(var.tags, { Name = "${var.name_prefix}-waf-bucket-events" })
+}
+
+data "aws_iam_policy_document" "waf_bucket_events_policy" {
+  statement {
+    sid       = "AllowS3Publish"
+    effect    = "Allow"
+    actions   = ["SNS:Publish"]
+    resources = [aws_sns_topic.waf_bucket_events.arn]
+
+    principals {
+      type        = "Service"
+      identifiers = ["s3.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "AWS:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+}
+
+resource "aws_sns_topic_policy" "waf_bucket_events" {
+  arn    = aws_sns_topic.waf_bucket_events.arn
+  policy = data.aws_iam_policy_document.waf_bucket_events_policy.json
+}
+
+resource "aws_s3_bucket_notification" "waf_logs" {
+  bucket = aws_s3_bucket.waf_logs.id
+
+  topic {
+    topic_arn = aws_sns_topic.waf_bucket_events.arn
+    events    = ["s3:ObjectCreated:*"]
+  }
+}
+
+resource "aws_iam_role" "firehose_waf" {
+  name = "${var.name_prefix}-firehose-waf-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "firehose.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-firehose-waf-role" })
+}
+
+data "aws_iam_policy_document" "firehose_waf" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "s3:AbortMultipartUpload",
+      "s3:GetBucketLocation",
+      "s3:GetObject",
+      "s3:ListBucket",
+      "s3:ListBucketMultipartUploads",
+      "s3:PutObject"
+    ]
+    resources = [
+      aws_s3_bucket.waf_logs.arn,
+      "${aws_s3_bucket.waf_logs.arn}/*"
+    ]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:DescribeKey"
+    ]
+    resources = [aws_kms_key.waf_logs.arn]
+  }
+}
+
+resource "aws_iam_role_policy" "firehose_waf" {
+  name   = "${var.name_prefix}-firehose-waf-policy"
+  role   = aws_iam_role.firehose_waf.id
+  policy = data.aws_iam_policy_document.firehose_waf.json
+}
+
+resource "aws_kinesis_firehose_delivery_stream" "waf" {
+  name        = "${var.name_prefix}-waf-logs"
+  destination = "extended_s3"
+
+  server_side_encryption {
+    enabled  = true
+    key_type = "CUSTOMER_MANAGED_CMK"
+    key_arn  = aws_kms_key.waf_logs.arn
+  }
+
+  extended_s3_configuration {
+    role_arn   = aws_iam_role.firehose_waf.arn
+    bucket_arn = aws_s3_bucket.waf_logs.arn
+
+    prefix              = "waf-logs/"
+    error_output_prefix = "waf-errors/"
+
+    buffering_size     = 5
+    buffering_interval = 300
+
+    compression_format = "GZIP"
+  }
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-waf-firehose" })
+}
+
+resource "aws_wafv2_web_acl_logging_configuration" "alb" {
+  resource_arn = aws_wafv2_web_acl.alb.arn
+
+  log_destination_configs = [
+    aws_kinesis_firehose_delivery_stream.waf.arn
+  ]
+
+  depends_on = [aws_wafv2_web_acl.alb]
+}
+
+# ------------------------------------------------------------
 # ECS Cluster + Task + Service (Fargate)
 # ------------------------------------------------------------
 resource "aws_ecs_cluster" "this" {
@@ -329,94 +676,9 @@ resource "aws_ecs_service" "app" {
   enable_ecs_managed_tags = true
   propagate_tags          = "SERVICE"
 
-  depends_on = [aws_lb_listener.https]
+  depends_on = [
+    aws_lb_listener.https
+  ]
 
   tags = merge(var.tags, { Name = "${var.name_prefix}-service" })
-}
-
-# ------------------------------------------------------------
-# WAF Logging (Checkov CKV2_AWS_31)
-# WAF logs must go to Kinesis Data Firehose (then to S3).
-# ------------------------------------------------------------
-resource "aws_s3_bucket" "waf_logs" {
-  bucket        = "${var.name_prefix}-waf-logs-${data.aws_region.current.id}"
-  force_destroy = true
-  tags          = merge(var.tags, { Name = "${var.name_prefix}-waf-logs" })
-}
-
-resource "aws_s3_bucket_public_access_block" "waf_logs" {
-  bucket                  = aws_s3_bucket.waf_logs.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_ownership_controls" "waf_logs" {
-  bucket = aws_s3_bucket.waf_logs.id
-  rule { object_ownership = "BucketOwnerEnforced" }
-}
-
-resource "aws_iam_role" "firehose_waf" {
-  name = "${var.name_prefix}-firehose-waf-role"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Service = "firehose.amazonaws.com" }
-      Action    = "sts:AssumeRole"
-    }]
-  })
-  tags = merge(var.tags, { Name = "${var.name_prefix}-firehose-waf-role" })
-}
-
-data "aws_iam_policy_document" "firehose_waf" {
-  statement {
-    effect = "Allow"
-    actions = [
-      "s3:AbortMultipartUpload",
-      "s3:GetBucketLocation",
-      "s3:GetObject",
-      "s3:ListBucket",
-      "s3:ListBucketMultipartUploads",
-      "s3:PutObject"
-    ]
-    resources = [
-      aws_s3_bucket.waf_logs.arn,
-      "${aws_s3_bucket.waf_logs.arn}/*"
-    ]
-  }
-}
-
-resource "aws_iam_role_policy" "firehose_waf" {
-  name   = "${var.name_prefix}-firehose-waf-policy"
-  role   = aws_iam_role.firehose_waf.id
-  policy = data.aws_iam_policy_document.firehose_waf.json
-}
-
-resource "aws_kinesis_firehose_delivery_stream" "waf" {
-  name        = "${var.name_prefix}-waf-logs"
-  destination = "extended_s3"
-
-  extended_s3_configuration {
-    role_arn   = aws_iam_role.firehose_waf.arn
-    bucket_arn = aws_s3_bucket.waf_logs.arn
-
-    prefix              = "waf-logs/"
-    error_output_prefix = "waf-errors/"
-
-    buffering_size     = 5
-    buffering_interval = 300
-
-    compression_format = "GZIP"
-  }
-
-  tags = merge(var.tags, { Name = "${var.name_prefix}-waf-firehose" })
-}
-
-resource "aws_wafv2_web_acl_logging_configuration" "alb" {
-  resource_arn            = aws_wafv2_web_acl.alb.arn
-  log_destination_configs = [aws_kinesis_firehose_delivery_stream.waf.arn]
-
-  depends_on = [aws_wafv2_web_acl.alb]
 }

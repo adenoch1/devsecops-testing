@@ -1,101 +1,115 @@
 variable "name_prefix" {
+  description = "Prefix used to name resources"
   type        = string
-  description = "Prefix for naming resources"
 }
 
 variable "tags" {
+  description = "Common tags applied to resources"
   type        = map(string)
-  description = "Common tags"
+  default     = {}
 }
 
 variable "vpc_id" {
-  type        = string
   description = "VPC ID"
+  type        = string
 }
 
 variable "vpc_cidr" {
+  description = "VPC CIDR block"
   type        = string
-  description = "VPC CIDR block (used to restrict DNS egress)"
 }
 
 variable "public_subnet_ids" {
+  description = "Public subnet IDs for the ALB"
   type        = list(string)
-  description = "Public subnet IDs (ALB here)"
 }
 
 variable "private_subnet_ids" {
+  description = "Private subnet IDs for ECS tasks"
   type        = list(string)
-  description = "Private subnet IDs (ECS tasks here)"
-}
-
-variable "ecr_repository_url" {
-  type        = string
-  description = "ECR repository URL"
-}
-
-variable "ecs_task_execution_role_arn" {
-  type        = string
-  description = "ECS task execution role ARN"
-}
-
-variable "ecs_task_role_arn" {
-  type        = string
-  description = "ECS task role ARN"
 }
 
 variable "app_port" {
+  description = "Application port exposed by the container"
   type        = number
-  description = "Application port"
 }
 
-variable "container_image_tag" {
-  type        = string
-  description = "Image tag"
-  default     = "latest"
-}
-
-variable "desired_count" {
-  type        = number
-  description = "Desired tasks"
-  default     = 1
-}
-
-variable "task_cpu" {
-  type        = number
-  description = "Fargate CPU"
-  default     = 256
-}
-
-variable "task_memory" {
-  type        = number
-  description = "Fargate memory (MB)"
-  default     = 512
-}
-
-# Week 3 hardening
 variable "acm_certificate_arn" {
+  description = "ACM certificate ARN for HTTPS listener"
   type        = string
-  description = "ACM certificate ARN for the ALB HTTPS listener (must be in same region)"
 }
 
 variable "alb_log_bucket_name" {
+  description = "S3 bucket name for ALB access logs"
   type        = string
-  description = "S3 bucket name to store ALB access logs"
 }
 
 variable "alb_log_prefix" {
+  description = "S3 prefix for ALB access logs"
   type        = string
-  description = "S3 prefix for ALB access logs (must not contain 'AWSLogs')"
   default     = "alb-access"
 }
 
 variable "cloudwatch_logs_kms_key_arn" {
+  description = "KMS key ARN for CloudWatch log group encryption"
   type        = string
-  description = "KMS key ARN to encrypt CloudWatch log groups"
 }
 
 variable "log_retention_days" {
+  description = "CloudWatch log retention in days"
   type        = number
-  description = "Retention (days) for ECS CloudWatch logs"
   default     = 14
+}
+
+variable "ecr_repository_url" {
+  description = "ECR repository URL (without tag)"
+  type        = string
+}
+
+variable "container_image_tag" {
+  description = "Container image tag to deploy"
+  type        = string
+}
+
+variable "task_cpu" {
+  description = "Fargate task CPU"
+  type        = number
+  default     = 256
+}
+
+variable "task_memory" {
+  description = "Fargate task memory"
+  type        = number
+  default     = 512
+}
+
+variable "desired_count" {
+  description = "Desired number of tasks"
+  type        = number
+  default     = 2
+}
+
+variable "ecs_task_execution_role_arn" {
+  description = "IAM role ARN for ECS task execution role"
+  type        = string
+}
+
+variable "ecs_task_role_arn" {
+  description = "IAM role ARN for ECS task role"
+  type        = string
+}
+
+# ------------------------------------------------------------
+# WAF Logs bucket lifecycle controls (used in ecs/main.tf)
+# ------------------------------------------------------------
+variable "lifecycle_expire_days" {
+  description = "Days before objects expire in WAF logging buckets"
+  type        = number
+  default     = 90
+}
+
+variable "lifecycle_glacier_days" {
+  description = "Days before objects transition to Glacier in WAF logging buckets"
+  type        = number
+  default     = 30
 }
