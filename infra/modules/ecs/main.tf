@@ -682,3 +682,15 @@ resource "aws_ecs_service" "app" {
 
   tags = merge(var.tags, { Name = "${var.name_prefix}-service" })
 }
+
+# ------------------------------------------------------------
+# Event notifications for waf_logs_access bucket (CKV2_AWS_62)
+# ------------------------------------------------------------
+resource "aws_s3_bucket_notification" "waf_logs_access" {
+  bucket = aws_s3_bucket.waf_logs_access.id
+
+  topic {
+    topic_arn = aws_sns_topic.waf_bucket_events.arn
+    events    = ["s3:ObjectCreated:*"]
+  }
+}
