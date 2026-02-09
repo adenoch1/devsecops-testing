@@ -5,7 +5,6 @@ on:
     branches: ["main"]
     paths:
       - "infra/**/*.tf"
-      - "infra/modules/**/*.tf"
       - "infra/**/terraform.tfvars"
       - "modules/**/*.tf"
       - "policy/**"
@@ -47,11 +46,10 @@ jobs:
 
       - name: Terraform fmt (check)
         working-directory: .
+        shell: bash
         run: |
           set -euo pipefail
 
-          # Some repos keep modules at repo root (./modules), others under ./infra/modules.
-          # This makes fmt check resilient to either layout.
           targets=("infra")
           if [ -d "modules" ]; then targets+=("modules"); fi
           if [ -d "infra/modules" ]; then targets+=("infra/modules"); fi
@@ -66,9 +64,9 @@ jobs:
         run: terraform validate
 
       # -----------------------------
-      # Ensure tfvars exists (used by tfsec + plan)
+      # Ensure tfvars exists (used by plan)
       # -----------------------------
-      - name: Ensure tfvars exists for scans + plan
+      - name: Ensure tfvars exists for plan
         shell: bash
         run: |
           set -euo pipefail
@@ -77,7 +75,7 @@ jobs:
             echo "Found terraform.tfvars in $(pwd)"
             ls -la terraform.tfvars
           else
-            echo "terraform.tfvars not found in $(pwd). Creating .ci.auto.tfvars for CI scans/plan..."
+            echo "terraform.tfvars not found in $(pwd). Creating .ci.auto.tfvars for CI plan..."
             {
               echo 'aws_region  = "ca-central-1"'
               echo 'project     = "devsecops-testing"'
@@ -95,38 +93,38 @@ jobs:
               echo 'health_check_path = "/health"'
             } > .ci.auto.tfvars
 
-            echo "Created .ci.auto.tfvars:"
             ls -la .ci.auto.tfvars
           fi
 
       # -----------------------------
-      # tfsec (robust): install + run
+      # Trivy (IaC scan) - run from repo root
       # -----------------------------
-      - name: Install tfsec
+      - name: Install Trivy
+        working-directory: .
         shell: bash
         run: |
           set -euo pipefail
-          curl -sSL https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
-          tfsec --version
+          sudo apt-get update -y
+          sudo apt-get install -y curl
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sudo sh -s -- -b /usr/local/bin
+          trivy --version
 
-      - name: tfsec (IaC security scan)
+      - name: Trivy IaC Scan (Terraform)
+        working-directory: .
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f terraform.tfvars ]; then
-            tfsec . --tfvars-file terraform.tfvars --soft-fail
-          else
-            tfsec . --tfvars-file .ci.auto.tfvars --soft-fail
-          fi
+          trivy config --severity HIGH,CRITICAL --exit-code 1 --no-progress infra
 
       # -----------------------------
-      # Checkov (fail PR if policy fails)
-      # IMPORTANT: scan repo root so modules are included
+      # Checkov (IaC policy scan)
+      # Scan repo root so modules are included
       # -----------------------------
-      - name: checkov (IaC policy scan)
+      - name: Checkov (IaC policy scan)
         uses: bridgecrewio/checkov-action@v12
         with:
-          directory: ../..
+          directory: .
           framework: terraform
           quiet: true
           soft_fail: false
@@ -149,6 +147,7 @@ jobs:
         run: terraform show -json tfplan.binary > tfplan.json
 
       - name: Install Conftest
+        working-directory: .
         shell: bash
         run: |
           set -euo pipefail
