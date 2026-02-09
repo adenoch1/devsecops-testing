@@ -148,16 +148,16 @@ jobs:
           skip_check: CKV2_AWS_76,CKV_AWS_109,CKV_AWS_111,CKV_AWS_356,CKV_AWS_144
 
       # ------------------------------------------------------------
-      # Terraform plan
+      # Terraform plan (with refresh)
       # ------------------------------------------------------------
       - name: Terraform plan
         shell: bash
         run: |
           set -euo pipefail
           if [ -f terraform.tfvars ]; then
-            terraform plan -input=false -var-file="terraform.tfvars" -out=tfplan.binary
+            terraform plan -input=false -refresh=true -var-file="terraform.tfvars" -out=tfplan.binary
           else
-            terraform plan -input=false -var-file=".ci.auto.tfvars" -out=tfplan.binary
+            terraform plan -input=false -refresh=true -var-file=".ci.auto.tfvars" -out=tfplan.binary
           fi
 
       - name: Terraform show (json)
