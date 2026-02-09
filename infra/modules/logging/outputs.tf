@@ -18,6 +18,11 @@ output "cloudwatch_logs_kms_key_arn" {
   value       = aws_kms_key.cloudwatch_logs.arn
 }
 
+output "sns_kms_key_arn" {
+  description = "KMS key ARN used to encrypt the SNS topic for S3 events"
+  value       = aws_kms_key.sns.arn
+}
+
 output "region" {
   description = "AWS region of the logging module"
   value       = data.aws_region.current.id
