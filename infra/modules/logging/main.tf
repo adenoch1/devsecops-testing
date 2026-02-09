@@ -756,7 +756,7 @@ data "aws_iam_policy_document" "alb_logs_bucket_policy" {
     resources = [aws_s3_bucket.alb_logs.arn]
 
     principals {
-      type        = "Service"
+      type = "Service"
       identifiers = [
         "logdelivery.elasticloadbalancing.amazonaws.com",
         "elasticloadbalancing.amazonaws.com"
@@ -773,7 +773,7 @@ data "aws_iam_policy_document" "alb_logs_bucket_policy" {
     ]
 
     principals {
-      type        = "Service"
+      type = "Service"
       identifiers = [
         "logdelivery.elasticloadbalancing.amazonaws.com",
         "elasticloadbalancing.amazonaws.com"
