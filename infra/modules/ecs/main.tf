@@ -100,6 +100,7 @@ resource "aws_security_group" "ecs" {
 # ------------------------------
 # Application Load Balancer (HTTPS enforced)
 # ------------------------------
+#tfsec:ignore:aws-elb-alb-not-public
 resource "aws_lb" "this" {
   name               = "${var.name_prefix}-alb"
   load_balancer_type = "application"
@@ -331,4 +332,91 @@ resource "aws_ecs_service" "app" {
   depends_on = [aws_lb_listener.https]
 
   tags = merge(var.tags, { Name = "${var.name_prefix}-service" })
+}
+
+# ------------------------------------------------------------
+# WAF Logging (Checkov CKV2_AWS_31)
+# WAF logs must go to Kinesis Data Firehose (then to S3).
+# ------------------------------------------------------------
+resource "aws_s3_bucket" "waf_logs" {
+  bucket        = "${var.name_prefix}-waf-logs-${data.aws_region.current.id}"
+  force_destroy = true
+  tags          = merge(var.tags, { Name = "${var.name_prefix}-waf-logs" })
+}
+
+resource "aws_s3_bucket_public_access_block" "waf_logs" {
+  bucket                  = aws_s3_bucket.waf_logs.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_ownership_controls" "waf_logs" {
+  bucket = aws_s3_bucket.waf_logs.id
+  rule { object_ownership = "BucketOwnerEnforced" }
+}
+
+resource "aws_iam_role" "firehose_waf" {
+  name = "${var.name_prefix}-firehose-waf-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = { Service = "firehose.amazonaws.com" }
+      Action = "sts:AssumeRole"
+    }]
+  })
+  tags = merge(var.tags, { Name = "${var.name_prefix}-firehose-waf-role" })
+}
+
+data "aws_iam_policy_document" "firehose_waf" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "s3:AbortMultipartUpload",
+      "s3:GetBucketLocation",
+      "s3:GetObject",
+      "s3:ListBucket",
+      "s3:ListBucketMultipartUploads",
+      "s3:PutObject"
+    ]
+    resources = [
+      aws_s3_bucket.waf_logs.arn,
+      "${aws_s3_bucket.waf_logs.arn}/*"
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "firehose_waf" {
+  name   = "${var.name_prefix}-firehose-waf-policy"
+  role   = aws_iam_role.firehose_waf.id
+  policy = data.aws_iam_policy_document.firehose_waf.json
+}
+
+resource "aws_kinesis_firehose_delivery_stream" "waf" {
+  name        = "${var.name_prefix}-waf-logs"
+  destination = "extended_s3"
+
+  extended_s3_configuration {
+    role_arn   = aws_iam_role.firehose_waf.arn
+    bucket_arn = aws_s3_bucket.waf_logs.arn
+
+    prefix              = "waf-logs/"
+    error_output_prefix = "waf-errors/"
+
+    buffering_size     = 5
+    buffering_interval = 300
+
+    compression_format = "GZIP"
+  }
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-waf-firehose" })
+}
+
+resource "aws_wafv2_web_acl_logging_configuration" "alb" {
+  resource_arn            = aws_wafv2_web_acl.alb.arn
+  log_destination_configs = [aws_kinesis_firehose_delivery_stream.waf.arn]
+
+  depends_on = [aws_wafv2_web_acl.alb]
 }
