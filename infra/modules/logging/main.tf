@@ -458,8 +458,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm     = "aws:kms"
-      kms_master_key_id = aws_kms_key.alb_logs.arn
+      sse_algorithm = "AES256"
     }
   }
 }
@@ -754,13 +753,9 @@ data "aws_iam_policy_document" "alb_logs_bucket_policy" {
     effect    = "Allow"
     actions   = ["s3:GetBucketAcl", "s3:ListBucket"]
     resources = [aws_s3_bucket.alb_logs.arn]
-
     principals {
-      type = "Service"
-      identifiers = [
-        "logdelivery.elasticloadbalancing.amazonaws.com",
-        "elasticloadbalancing.amazonaws.com"
-      ]
+      type        = "Service"
+      identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
     }
   }
 
@@ -771,16 +766,12 @@ data "aws_iam_policy_document" "alb_logs_bucket_policy" {
     resources = [
       "${aws_s3_bucket.alb_logs.arn}/${local.alb_log_key_prefix}"
     ]
-
     principals {
-      type = "Service"
-      identifiers = [
-        "logdelivery.elasticloadbalancing.amazonaws.com",
-        "elasticloadbalancing.amazonaws.com"
-      ]
+      type        = "Service"
+      identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
     }
 
-    # ALB log delivery uses bucket-owner-full-control ACL.
+    # ALB log delivery writes objects with this ACL so the bucket owner owns the logs.
     condition {
       test     = "StringEquals"
       variable = "s3:x-amz-acl"
