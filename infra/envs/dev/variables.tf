@@ -101,3 +101,9 @@ variable "replication_region" {
   description = "Secondary region for replication (used by aws.replica provider alias)"
   default     = "us-east-1"
 }
+
+variable "health_check_path" {
+  description = "Health check path for ALB target group"
+  type        = string
+  default     = "/health"
+}
