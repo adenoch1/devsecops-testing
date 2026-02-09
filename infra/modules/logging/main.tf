@@ -210,6 +210,7 @@ resource "aws_s3_bucket" "alb_logs_access" {
   tags          = merge(var.tags, { Name = local.log_access_bucket_name })
 }
 
+# checkov:skip=CKV_AWS_145: ALB access log destination buckets do not support SSE-KMS; must use SSE-S3 (AES256)
 resource "aws_s3_bucket" "alb_logs" {
   bucket        = local.log_bucket_name
   force_destroy = true
@@ -309,24 +310,6 @@ resource "aws_s3_bucket_public_access_block" "alb_logs_audit_access" {
 resource "aws_s3_bucket_ownership_controls" "log_buckets" {
   for_each = local.log_buckets
   bucket   = each.value
-
-  # IMPORTANT:
-  # local.log_buckets contains *names* (strings), not references to aws_s3_bucket resources.
-  # Without an explicit dependency, Terraform can race and attempt to apply ownership
-  # controls before the bucket is created, causing:
-  #   NoSuchBucket: The specified bucket does not exist
-  # We force the correct ordering by depending on the bucket resources.
-  depends_on = [
-    aws_s3_bucket.ultimate_sink,
-    aws_s3_bucket.server_access_logs,
-    aws_s3_bucket.final_sink,
-    aws_s3_bucket.access_audit_sink,
-    aws_s3_bucket.access_audit,
-    aws_s3_bucket.alb_logs_access,
-    aws_s3_bucket.alb_logs,
-    aws_s3_bucket.alb_logs_audit,
-    aws_s3_bucket.alb_logs_audit_access,
-  ]
 
   rule {
     object_ownership = "BucketOwnerEnforced"

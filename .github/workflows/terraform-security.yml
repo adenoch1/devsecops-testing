@@ -130,7 +130,7 @@ jobs:
 
           TFVARS="infra/envs/dev/terraform.tfvars"
           if [ -f "$TFVARS" ]; then
-            trivy config --quiet --severity HIGH,CRITICAL --exit-code 1 --tf-vars "$TFVARS" infra
+            trivy config --quiet --severity HIGH,CRITICAL --exit-code 1 --tf-vars "$TFVARS" infra --ignorefile .trivyignore
           else
             trivy config --quiet --severity HIGH,CRITICAL --exit-code 1 infra
           fi

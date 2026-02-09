@@ -1,0 +1,6 @@
+# Trivy ignore list for IaC misconfigurations
+# AWS-0132 / AVD-AWS-0132:
+# ALB access-log destination buckets do NOT support SSE-KMS (CMK).
+# We intentionally use SSE-S3 (AES256) for the ALB logs bucket so log delivery works.
+AWS-0132
+AVD-AWS-0132
