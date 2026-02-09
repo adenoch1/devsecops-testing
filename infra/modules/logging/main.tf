@@ -209,8 +209,9 @@ resource "aws_s3_bucket" "alb_logs_access" {
   force_destroy = true
   tags          = merge(var.tags, { Name = local.log_access_bucket_name })
 }
-#checkov:skip=CKV_AWS_145: ALB access log destination bucket must use SSE-S3 (AES256); SSE-KMS breaks ALB log delivery.
+# checkov:skip=CKV_AWS_145: ALB access log destination bucket must use SSE-S3 (AES256); SSE-KMS breaks ALB log delivery (AccessDenied).
 resource "aws_s3_bucket" "alb_logs" {
+  # checkov:skip=CKV_AWS_145: see above; ALB log delivery requires SSE-S3.
   bucket        = local.log_bucket_name
   force_destroy = true
   tags          = merge(var.tags, { Name = local.log_bucket_name })
