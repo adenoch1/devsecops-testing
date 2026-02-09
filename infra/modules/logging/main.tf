@@ -210,7 +210,6 @@ resource "aws_s3_bucket" "alb_logs_access" {
   tags          = merge(var.tags, { Name = local.log_access_bucket_name })
 }
 
-# checkov:skip=CKV_AWS_145: ALB access log destination bucket must use SSE-S3 (AES256); SSE-KMS breaks ALB log delivery.
 resource "aws_s3_bucket" "alb_logs" {
   bucket        = local.log_bucket_name
   force_destroy = true
@@ -449,16 +448,14 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs_access" 
   }
 }
 
-# trivy:ignore:AWS-0132
-# Reason: ALB access logs delivery to S3 does not support SSE-KMS (CMK) encryption.
-# Using SSE-KMS causes log delivery to fail with "Access Denied for bucket ...".
-# For the ALB logs *destination* bucket, SSE-S3 (AES256) is the supported option.
+# SSE-KMS for ALB logs bucket (required to satisfy CKV_AWS_145)
 resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.alb_logs.arn
     }
   }
 }
