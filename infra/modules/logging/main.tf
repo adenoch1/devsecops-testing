@@ -209,9 +209,9 @@ resource "aws_s3_bucket" "alb_logs_access" {
   force_destroy = true
   tags          = merge(var.tags, { Name = local.log_access_bucket_name })
 }
-
-# checkov:skip=CKV_AWS_145: ALB access log destination bucket must use SSE-S3 (AES256); SSE-KMS breaks ALB log delivery.
+# checkov:skip=CKV_AWS_145: ALB access log destination bucket must use SSE-S3 (AES256); SSE-KMS breaks ALB log delivery (AccessDenied).
 resource "aws_s3_bucket" "alb_logs" {
+  # checkov:skip=CKV_AWS_145: see above; ALB log delivery requires SSE-S3.
   bucket        = local.log_bucket_name
   force_destroy = true
   tags          = merge(var.tags, { Name = local.log_bucket_name })
@@ -458,8 +458,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm     = "aws:kms"
-      kms_master_key_id = aws_kms_key.alb_logs.arn
+      sse_algorithm = "AES256"
     }
   }
 }
@@ -754,13 +753,9 @@ data "aws_iam_policy_document" "alb_logs_bucket_policy" {
     effect    = "Allow"
     actions   = ["s3:GetBucketAcl", "s3:ListBucket"]
     resources = [aws_s3_bucket.alb_logs.arn]
-
     principals {
-      type = "Service"
-      identifiers = [
-        "logdelivery.elasticloadbalancing.amazonaws.com",
-        "elasticloadbalancing.amazonaws.com"
-      ]
+      type        = "Service"
+      identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
     }
   }
 
@@ -771,20 +766,9 @@ data "aws_iam_policy_document" "alb_logs_bucket_policy" {
     resources = [
       "${aws_s3_bucket.alb_logs.arn}/${local.alb_log_key_prefix}"
     ]
-
     principals {
-      type = "Service"
-      identifiers = [
-        "logdelivery.elasticloadbalancing.amazonaws.com",
-        "elasticloadbalancing.amazonaws.com"
-      ]
-    }
-
-    # ALB log delivery uses bucket-owner-full-control ACL.
-    condition {
-      test     = "StringEquals"
-      variable = "s3:x-amz-acl"
-      values   = ["bucket-owner-full-control"]
+      type        = "Service"
+      identifiers = ["logdelivery.elasticloadbalancing.amazonaws.com"]
     }
   }
 }
