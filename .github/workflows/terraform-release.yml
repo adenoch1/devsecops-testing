@@ -320,7 +320,7 @@ jobs:
       - name: Terraform destroy
         run: terraform destroy -auto-approve -parallelism=1
 
-  ##############################################
+  ############################################
   # Standalone destroy (manual)
   ##############################################
   destroy_only:
