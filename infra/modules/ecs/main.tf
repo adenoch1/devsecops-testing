@@ -685,7 +685,7 @@ resource "aws_ecs_service" "app" {
   tags = merge(var.tags, { Name = "${var.name_prefix}-service" })
 }
 
-# ------------------------------------------------------------
+# ----------------------------------------------------------
 # Event notifications for waf_logs_access bucket (CKV2_AWS_62)
 # ------------------------------------------------------------
 resource "aws_s3_bucket_notification" "waf_logs_access" {
