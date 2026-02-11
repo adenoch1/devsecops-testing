@@ -102,8 +102,8 @@ resource "aws_kms_key" "dynamodb" {
       # ✅ NEW: Allow GitHubActions roles in this account to use the key, but ONLY via DynamoDB in this region
       # This fixes "Error acquiring the state lock" (kms:Decrypt denied) during PutItem/GetItem on lock table.
       {
-        Sid      = "AllowGitHubActionsRolesViaDynamoDB"
-        Effect   = "Allow"
+        Sid       = "AllowGitHubActionsRolesViaDynamoDB"
+        Effect    = "Allow"
         Principal = { AWS = "*" }
         Action = [
           "kms:Encrypt",
