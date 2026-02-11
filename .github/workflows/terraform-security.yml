@@ -85,7 +85,7 @@ jobs:
             } > .ci.auto.tfvars
           fi
 
-      # ✅ FIX: Install Trivy CLI before using `trivy ...`
+      # Install Trivy (needed because you call `trivy` CLI directly)
       - name: Install Trivy
         working-directory: .
         shell: bash
@@ -106,11 +106,16 @@ jobs:
           set -euo pipefail
           # Prefer real terraform.tfvars; otherwise use the generated .ci.auto.tfvars
           if [ -f "infra/envs/dev/terraform.tfvars" ]; then
-            trivy config --quiet --severity HIGH,CRITICAL --exit-code 1 --tf-vars "infra/envs/dev/terraform.tfvars" infra --ignorefile .trivyignore
+            trivy config --quiet --severity HIGH,CRITICAL --exit-code 1 \
+              --tf-vars "infra/envs/dev/terraform.tfvars" infra --ignorefile .trivyignore
           else
-            trivy config --quiet --severity HIGH,CRITICAL --exit-code 1 --tf-vars "infra/envs/dev/.ci.auto.tfvars" infra --ignorefile .trivyignore
+            trivy config --quiet --severity HIGH,CRITICAL --exit-code 1 \
+              --tf-vars "infra/envs/dev/.ci.auto.tfvars" infra --ignorefile .trivyignore
           fi
 
+      # Checkov policy scan
+      # We skip CKV2_AWS_62 because event notifications are not required for tfstate/log buckets
+      # and will create noise for a bootstrap foundation module.
       - name: Checkov (IaC policy scan)
         uses: bridgecrewio/checkov-action@v12
         with:
@@ -118,7 +123,13 @@ jobs:
           framework: terraform
           quiet: true
           soft_fail: false
-          skip_check: CKV2_AWS_76,CKV_AWS_109,CKV_AWS_111,CKV_AWS_356,CKV_AWS_144
+          skip_check: >
+            CKV2_AWS_62,
+            CKV2_AWS_76,
+            CKV_AWS_109,
+            CKV_AWS_111,
+            CKV_AWS_356,
+            CKV_AWS_144
 
       - name: Terraform plan
         shell: bash
