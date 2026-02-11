@@ -13,6 +13,7 @@ on:
 permissions:
   id-token: write
   contents: read
+  security-events: write
 
 env:
   TF_IN_AUTOMATION: "true"
@@ -111,15 +112,35 @@ jobs:
               --tf-vars "infra/envs/dev/.ci.auto.tfvars" infra --ignorefile .trivyignore
           fi
 
-      - name: Checkov (IaC policy scan)
-        uses: bridgecrewio/checkov-action@v12
+      - name: Install Checkov (CLI)
+        working-working-directory: .
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          pip3 install "checkov>=3.2.0"
+          checkov --version
+
+      - name: Checkov (CLI) - Terraform policy scan (SARIF)
+        working-directory: .
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # IMPORTANT: Checkov expects a SINGLE value after --skip-check (comma-separated)
+          SKIP="CKV2_AWS_62,CKV2_AWS_76,CKV_AWS_109,CKV_AWS_111,CKV_AWS_356,CKV_AWS_144"
+
+          checkov -d . \
+            --framework terraform \
+            --skip-check "$SKIP" \
+            --quiet \
+            --output sarif \
+            --output-file-path results.sarif
+
+      - name: Upload Checkov SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
         with:
-          directory: .
-          framework: terraform
-          quiet: true
-          soft_fail: false
-          # IMPORTANT: must be a single string; space-separated is safest
-          skip_check: "CKV2_AWS_62 CKV2_AWS_76 CKV_AWS_109 CKV_AWS_111 CKV_AWS_356 CKV_AWS_144"
+          sarif_file: results.sarif
 
       - name: Terraform plan
         shell: bash
