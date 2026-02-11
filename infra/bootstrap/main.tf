@@ -57,6 +57,7 @@ resource "aws_kms_alias" "logs" {
   target_key_id = aws_kms_key.logs.key_id
 }
 
+# ✅ FIX IS HERE: allow DynamoDB service to use this CMK (scoped to account + region)
 resource "aws_kms_key" "dynamodb" {
   description             = "KMS CMK for Terraform lock DynamoDB table"
   deletion_window_in_days = 10
@@ -65,12 +66,37 @@ resource "aws_kms_key" "dynamodb" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
+      # Admin control for your account root
       {
         Sid       = "EnableRootPermissions"
         Effect    = "Allow"
         Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
         Action    = "kms:*"
         Resource  = "*"
+      },
+
+      # Allow DynamoDB (service) to use the key for encryption/decryption at rest
+      {
+        Sid    = "AllowDynamoDBUseOfTheKey"
+        Effect = "Allow"
+        Principal = {
+          Service = "dynamodb.amazonaws.com"
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey",
+          "kms:CreateGrant"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+            "kms:ViaService"    = "dynamodb.${data.aws_region.current.name}.amazonaws.com"
+          }
+        }
       }
     ]
   })
@@ -157,12 +183,8 @@ resource "aws_s3_bucket_policy" "tfstate" {
 
 # -----------------------------
 # S3 Access Logs Bucket (target for server access logging)
-# IMPORTANT:
-# - Your existing bucket has ACLs already, and AWS blocks switching to BucketOwnerEnforced in-place.
-# - We force a NEW bucket by changing the name (v2), then enable BucketOwnerEnforced on the new bucket.
 # -----------------------------
 resource "aws_s3_bucket" "access_logs" {
-  # v2 forces a fresh bucket so ownership controls can be applied without ACL conflicts
   bucket        = "${var.name_prefix}-s3-access-logs-v2-${data.aws_caller_identity.current.account_id}"
   force_destroy = var.logs_bucket_force_destroy
 
@@ -398,7 +420,7 @@ resource "aws_s3_bucket_policy" "logs" {
   })
 }
 
-# ------------------------------
+# -----------------------------
 # Enable server access logging for buckets
 # -----------------------------
 resource "aws_s3_bucket_logging" "tfstate" {
