@@ -49,31 +49,72 @@ resource "aws_kms_key" "alb_logs" {
   enable_key_rotation     = true
 
   policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid       = "EnableRootPermissions"
-        Effect    = "Allow"
-        Principal = { AWS = "arn:aws:iam::${local.account_id}:root" }
-        Action    = "kms:*"
-        Resource  = "*"
-      },
-      {
-        Sid       = "AllowS3UseOfKey"
-        Effect    = "Allow"
-        Principal = { Service = "s3.amazonaws.com" }
-        Action = [
-          "kms:Encrypt",
-          "kms:Decrypt",
-          "kms:ReEncrypt*",
-          "kms:GenerateDataKey*",
-          "kms:DescribeKey"
-        ]
-        Resource = "*"
-      }
-    ]
-  })
 
+    Version = "2012-10-17"
+
+    Statement = [
+
+      {
+
+        Sid = "EnableRootAndTerraformAdmin"
+
+        Effect = "Allow"
+
+        Principal = {
+
+          AWS = [
+
+            "arn:aws:iam::476532114555:root",
+
+            "arn:aws:iam::476532114555:role/GitHubActions-Terraform-DevSecOps-Role",
+
+            "arn:aws:iam::476532114555:role/GitHubActions-Terraform-DevSecOps-Plan-Policy",
+
+          ]
+
+        }
+
+        Action = "kms:*"
+
+        Resource = "*"
+
+      },
+
+      {
+
+        Sid = "AllowServiceUseOfTheKey"
+
+        Effect = "Allow"
+
+        Principal = {
+
+          Service = "logs.ca-central-1.amazonaws.com"
+
+        }
+
+        Action = [
+
+          "kms:Encrypt",
+
+          "kms:Decrypt",
+
+          "kms:ReEncrypt*",
+
+          "kms:GenerateDataKey*",
+
+          "kms:DescribeKey",
+
+          "kms:CreateGrant"
+
+        ]
+
+        Resource = "*"
+
+      },
+
+    ]
+
+  })
   tags = merge(var.tags, { Name = "${var.name_prefix}-alb-logs-kms" })
 }
 
@@ -88,31 +129,72 @@ resource "aws_kms_key" "cloudwatch_logs" {
   enable_key_rotation     = true
 
   policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid       = "EnableRootPermissions"
-        Effect    = "Allow"
-        Principal = { AWS = "arn:aws:iam::${local.account_id}:root" }
-        Action    = "kms:*"
-        Resource  = "*"
-      },
-      {
-        Sid       = "AllowCloudWatchLogs"
-        Effect    = "Allow"
-        Principal = { Service = "logs.${local.region}.amazonaws.com" }
-        Action = [
-          "kms:Encrypt",
-          "kms:Decrypt",
-          "kms:ReEncrypt*",
-          "kms:GenerateDataKey*",
-          "kms:DescribeKey"
-        ]
-        Resource = "*"
-      }
-    ]
-  })
 
+    Version = "2012-10-17"
+
+    Statement = [
+
+      {
+
+        Sid = "EnableRootAndTerraformAdmin"
+
+        Effect = "Allow"
+
+        Principal = {
+
+          AWS = [
+
+            "arn:aws:iam::476532114555:root",
+
+            "arn:aws:iam::476532114555:role/GitHubActions-Terraform-DevSecOps-Role",
+
+            "arn:aws:iam::476532114555:role/GitHubActions-Terraform-DevSecOps-Plan-Policy",
+
+          ]
+
+        }
+
+        Action = "kms:*"
+
+        Resource = "*"
+
+      },
+
+      {
+
+        Sid = "AllowServiceUseOfTheKey"
+
+        Effect = "Allow"
+
+        Principal = {
+
+          Service = "logs.ca-central-1.amazonaws.com"
+
+        }
+
+        Action = [
+
+          "kms:Encrypt",
+
+          "kms:Decrypt",
+
+          "kms:ReEncrypt*",
+
+          "kms:GenerateDataKey*",
+
+          "kms:DescribeKey",
+
+          "kms:CreateGrant"
+
+        ]
+
+        Resource = "*"
+
+      },
+
+    ]
+
+  })
   tags = merge(var.tags, { Name = "${var.name_prefix}-cloudwatch-logs-kms" })
 }
 
@@ -132,28 +214,39 @@ resource "aws_kms_key" "sns" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid       = "EnableRootPermissions"
-        Effect    = "Allow"
-        Principal = { AWS = "arn:aws:iam::${local.account_id}:root" }
-        Action    = "kms:*"
-        Resource  = "*"
+        Sid    = "EnableRootAndTerraformAdmin"
+        Effect = "Allow"
+        Principal = {
+          AWS = [
+            "arn:aws:iam::476532114555:root",
+            "arn:aws:iam::476532114555:role/GitHubActions-Terraform-DevSecOps-Role",
+            "arn:aws:iam::476532114555:role/GitHubActions-Terraform-DevSecOps-Plan-Policy",
+          ]
+        }
+        Action   = "kms:*"
+        Resource = "*"
       },
       {
-        Sid       = "AllowSNSUseOfKey"
-        Effect    = "Allow"
-        Principal = { Service = "sns.amazonaws.com" }
+        Sid    = "AllowServiceUseOfTheKey"
+        Effect = "Allow"
+        Principal = {
+          Service = [
+            "sns.amazonaws.com",
+            "firehose.amazonaws.com",
+          ]
+        }
         Action = [
           "kms:Encrypt",
           "kms:Decrypt",
           "kms:ReEncrypt*",
           "kms:GenerateDataKey*",
-          "kms:DescribeKey"
+          "kms:DescribeKey",
+          "kms:CreateGrant"
         ]
         Resource = "*"
-      }
+      },
     ]
   })
-
   tags = merge(var.tags, { Name = "${var.name_prefix}-sns-kms" })
 }
 
