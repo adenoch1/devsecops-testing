@@ -398,7 +398,7 @@ resource "aws_s3_bucket_policy" "logs" {
   })
 }
 
-# -----------------------------
+# ------------------------------
 # Enable server access logging for buckets
 # -----------------------------
 resource "aws_s3_bucket_logging" "tfstate" {
