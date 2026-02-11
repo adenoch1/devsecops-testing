@@ -249,7 +249,7 @@ jobs:
           echo "::warning::HTTPS smoke test did not pass yet. Check DNS/CNAME/TLS/ALB target health."
           exit 0
 
-  ########################################################
+  ######################################################
   # Destroy (manual-only) — production consistent
   ########################################################
   destroy_only:
