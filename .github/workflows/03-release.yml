@@ -123,7 +123,6 @@ jobs:
           else
             echo "ERROR: ECR repo ${REPO_NAME} does not exist"
             echo "This must be created by Terraform first."
-            echo "Fix: merge infra + run terraform-release (it bootstraps infra) then rerun."
             exit 1
           fi
 
