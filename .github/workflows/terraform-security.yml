@@ -85,16 +85,30 @@ jobs:
             } > .ci.auto.tfvars
           fi
 
+      # ✅ FIX: Install Trivy CLI before using `trivy ...`
+      - name: Install Trivy
+        working-directory: .
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update -y
+          sudo apt-get install -y trivy
+          trivy --version
+
       - name: Trivy IaC Scan (Terraform)
         working-directory: .
         shell: bash
         run: |
           set -euo pipefail
-          TFVARS="infra/envs/dev/terraform.tfvars"
-          if [ -f "$TFVARS" ]; then
-            trivy config --quiet --severity HIGH,CRITICAL --exit-code 1 --tf-vars "$TFVARS" infra --ignorefile .trivyignore
+          # Prefer real terraform.tfvars; otherwise use the generated .ci.auto.tfvars
+          if [ -f "infra/envs/dev/terraform.tfvars" ]; then
+            trivy config --quiet --severity HIGH,CRITICAL --exit-code 1 --tf-vars "infra/envs/dev/terraform.tfvars" infra --ignorefile .trivyignore
           else
-            trivy config --quiet --severity HIGH,CRITICAL --exit-code 1 infra
+            trivy config --quiet --severity HIGH,CRITICAL --exit-code 1 --tf-vars "infra/envs/dev/.ci.auto.tfvars" infra --ignorefile .trivyignore
           fi
 
       - name: Checkov (IaC policy scan)
