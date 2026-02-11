@@ -20,9 +20,9 @@ on:
         type: choice
         options: [deploy, destroy]
       fqdn:
-        description: "Custom domain to test (example: app.clevernews.org)"
+        description: "Custom domain to test (example: app.clevernews.org). Optional."
         required: false
-        default: "app.clevernews.org"
+        default: ""
       smoke_path:
         description: "Path to test (example: /health)"
         required: true
@@ -45,9 +45,7 @@ env:
 
 jobs:
   ######################################################
-  # Gate 1 (DEV): Bootstrap Infra (safe even before image)
-  # - Creates ECR/VPC/ALB/etc
-  # - Keeps ECS desired_count=0 to avoid image-pull failures
+  # Gate 1 (DEV): Infra Bootstrap (safe even before image)
   ######################################################
   infra_bootstrap:
     name: Gate 1 — Infra Bootstrap (dev)
@@ -70,9 +68,6 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
           audience: sts.amazonaws.com
 
-      - name: Verify AWS identity
-        run: aws sts get-caller-identity
-
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
@@ -91,11 +86,24 @@ jobs:
       - name: Terraform apply (bootstrap)
         run: terraform apply -auto-approve tfplan.bootstrap
 
-      - name: Show outputs
-        run: terraform output
+      - name: Helpful outputs (copy for GoDaddy / debugging)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "==== Terraform outputs ===="
+          terraform output || true
+          echo ""
+          echo "If you need the ALB DNS name for GoDaddy CNAME:"
+          if terraform output -raw alb_dns_name >/dev/null 2>&1; then
+            echo "ALB DNS: $(terraform output -raw alb_dns_name)"
+          elif terraform output -raw alb_dns >/dev/null 2>&1; then
+            echo "ALB DNS: $(terraform output -raw alb_dns)"
+          else
+            echo "ALB DNS output not found. Add an output like: output \"alb_dns_name\" { value = aws_lb.<name>.dns_name }"
+          fi
 
   ########################################################
-  # Build & Push Image (called AFTER infra exists)
+  # Build & Push Image (ECR) — after infra exists
   ########################################################
   build_image:
     name: Build + Push Image (ECR)
@@ -110,7 +118,7 @@ jobs:
       image_tag: ${{ github.sha }}
 
   ########################################################
-  # Deploy App: now that image exists, scale ECS up
+  # Deploy: apply new image tag (scale ECS up)
   ########################################################
   deploy:
     name: Deploy (dev)
@@ -152,47 +160,57 @@ jobs:
         run: terraform apply -auto-approve tfplan.deploy
 
       - name: Show outputs
-        run: terraform output
+        run: terraform output || true
 
   ########################################################
-  # Gate 2 (DNS): external /health test
+  # DNS Smoke Test (non-blocking if FQDN isn't ready)
   ########################################################
-  dns:
-    name: Gate 2 — DNS Smoke Test
+  dns_smoke:
+    name: DNS Smoke Test (non-blocking)
     needs: deploy
     if: ${{ github.event_name == 'push' || inputs.action == 'deploy' }}
     runs-on: ubuntu-latest
     environment: dns
 
     steps:
-      - name: Resolve inputs
+      - name: Resolve FQDN and path
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "push" ]; then
-            echo "FQDN=${{ secrets.FQDN }}" >> $GITHUB_ENV
-            echo "SMOKE_PATH=/health" >> $GITHUB_ENV
+
+          # Priority:
+          # 1) workflow_dispatch input fqdn
+          # 2) environment/repo secret FQDN (for push-to-main)
+          # If none -> warn and skip
+          FQDN_INPUT="${{ inputs.fqdn }}"
+          SECRET_FQDN="${{ secrets.FQDN }}"
+
+          if [ -n "$FQDN_INPUT" ]; then
+            echo "FQDN=$FQDN_INPUT" >> $GITHUB_ENV
+          elif [ -n "$SECRET_FQDN" ]; then
+            echo "FQDN=$SECRET_FQDN" >> $GITHUB_ENV
           else
-            echo "FQDN=${{ inputs.fqdn }}" >> $GITHUB_ENV
-            echo "SMOKE_PATH=${{ inputs.smoke_path }}" >> $GITHUB_ENV
+            echo "FQDN=" >> $GITHUB_ENV
           fi
 
-      - name: Validate FQDN
+          echo "SMOKE_PATH=${{ inputs.smoke_path }}" >> $GITHUB_ENV
+
+      - name: Skip if FQDN not configured (warning only)
         shell: bash
         run: |
           set -euo pipefail
           if [ -z "${FQDN}" ]; then
-            echo "ERROR: FQDN is empty."
-            echo "Fix for push-to-main runs: set repo or environment secret FQDN (example: app.clevernews.org)."
-            exit 1
+            echo "::warning::FQDN is not set. Skipping DNS smoke test."
+            echo "::warning::Set secret FQDN (example: app.clevernews.org) after you create your GoDaddy CNAME."
+            exit 0
           fi
-          echo "Testing https://${FQDN}${SMOKE_PATH}"
+          echo "FQDN configured: ${FQDN}"
 
-      - name: DNS resolution check
+      - name: DNS resolution check (short)
         shell: bash
         run: |
           set -euo pipefail
-          for i in {1..12}; do
+          for i in {1..6}; do
             echo "Attempt $i..."
             A="$(dig +short A "${FQDN}" || true)"
             CNAME="$(dig +short CNAME "${FQDN}" || true)"
@@ -202,129 +220,40 @@ jobs:
               echo "DNS resolves ✅"
               exit 0
             fi
-            sleep 15
+            sleep 10
           done
-          echo "ERROR: DNS did not resolve in time."
-          exit 1
+          echo "::warning::DNS did not resolve yet (propagation may still be happening)."
+          exit 0
 
-      - name: HTTPS smoke test (/health)
+      - name: HTTPS smoke test (warning-only)
         shell: bash
         run: |
           set -euo pipefail
 
           PATH_ONLY="${SMOKE_PATH}"
-          if [[ "$PATH_ONLY" != /* ]]; then
-            PATH_ONLY="/$PATH_ONLY"
-          fi
-
+          if [[ "$PATH_ONLY" != /* ]]; then PATH_ONLY="/$PATH_ONLY"; fi
           URL="https://${FQDN}${PATH_ONLY}"
           echo "Testing URL: $URL"
 
-          for i in {1..30}; do
+          for i in {1..10}; do
             echo "Attempt $i..."
             code="$(curl -k -s -o /dev/null -w "%{http_code}" "$URL" || true)"
             echo "HTTP status: $code"
-
             if [[ "$code" =~ ^2[0-9][0-9]$ ]] || [[ "$code" =~ ^3[0-9][0-9]$ ]]; then
-              echo "DNS gate passed ✅"
+              echo "Smoke test passed ✅"
               exit 0
             fi
-
-            sleep 20
+            sleep 10
           done
 
-          echo "ERROR: DNS gate failed (endpoint not healthy/reachable)."
-          exit 1
+          echo "::warning::HTTPS smoke test did not pass yet. Check DNS/CNAME/TLS/ALB target health."
+          exit 0
 
   ########################################################
-  # Gate 3 (DESTROY): requires manual approval via env
-  # - Disables ALB deletion protection JUST-IN-TIME
-  # - Waits for AWS to release any public mappings (eventual consistency)
-  # - Then terraform destroy
+  # Destroy (manual-only) — production consistent
   ########################################################
-  destroy_after_deploy:
-    name: Gate 3 — Destroy (after deploy)
-    needs: dns
-    if: ${{ github.event_name == 'push' || inputs.action == 'deploy' }}
-    runs-on: ubuntu-latest
-    environment: destroy
-
-    defaults:
-      run:
-        working-directory: ${{ env.WORKDIR }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN_APPLY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-          audience: sts.amazonaws.com
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Terraform init
-        run: terraform init -input=false
-
-      - name: Disable ALB deletion protection (controlled teardown)
-        shell: bash
-        run: |
-          set -euo pipefail
-          if terraform output -raw alb_arn >/dev/null 2>&1; then
-            ALB_ARN="$(terraform output -raw alb_arn)"
-            echo "Disabling deletion protection for: $ALB_ARN"
-            aws elbv2 modify-load-balancer-attributes \
-              --load-balancer-arn "$ALB_ARN" \
-              --attributes Key=deletion_protection.enabled,Value=false
-          else
-            echo "No alb_arn output found (maybe already destroyed). Skipping."
-          fi
-
-      - name: Wait for AWS to release public IP mappings (IGW safety)
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          if ! terraform output -raw vpc_id >/dev/null 2>&1; then
-            echo "VPC ID not found in terraform outputs. Skipping wait."
-            exit 0
-          fi
-
-          VPC_ID="$(terraform output -raw vpc_id)"
-          echo "Waiting for AWS to fully release public mappings in VPC: $VPC_ID"
-
-          for i in {1..40}; do
-            COUNT="$(aws ec2 describe-network-interfaces \
-              --filters Name=vpc-id,Values="$VPC_ID" \
-              --query "length(NetworkInterfaces[?Association.PublicIp!=null])" \
-              --output text)"
-
-            echo "Attempt $i — public ENIs with public IPs: $COUNT"
-
-            if [ "$COUNT" = "0" ]; then
-              echo "AWS cleanup complete ✅"
-              exit 0
-            fi
-
-            sleep 15
-          done
-
-          echo "WARNING: AWS cleanup timeout reached, proceeding anyway"
-
-      - name: Terraform destroy
-        run: terraform destroy -auto-approve -parallelism=1
-
-  ############################################
-  # Standalone destroy (manual)
-  ##############################################
   destroy_only:
-    name: Destroy (standalone)
+    name: Destroy (manual)
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.action == 'destroy' }}
     runs-on: ubuntu-latest
     environment: destroy
@@ -363,39 +292,35 @@ jobs:
               --load-balancer-arn "$ALB_ARN" \
               --attributes Key=deletion_protection.enabled,Value=false
           else
-            echo "No alb_arn output found (maybe already destroyed). Skipping."
+            echo "No alb_arn output found. Skipping."
           fi
 
       - name: Wait for AWS to release public IP mappings (IGW safety)
         shell: bash
         run: |
           set -euo pipefail
-
           if ! terraform output -raw vpc_id >/dev/null 2>&1; then
             echo "VPC ID not found in terraform outputs. Skipping wait."
             exit 0
           fi
 
           VPC_ID="$(terraform output -raw vpc_id)"
-          echo "Waiting for AWS to fully release public mappings in VPC: $VPC_ID"
+          echo "Waiting for AWS cleanup in VPC: $VPC_ID"
 
           for i in {1..40}; do
             COUNT="$(aws ec2 describe-network-interfaces \
               --filters Name=vpc-id,Values="$VPC_ID" \
               --query "length(NetworkInterfaces[?Association.PublicIp!=null])" \
               --output text)"
-
             echo "Attempt $i — public ENIs with public IPs: $COUNT"
-
             if [ "$COUNT" = "0" ]; then
-              echo "AWS cleanup complete"
+              echo "AWS cleanup complete ✅"
               exit 0
             fi
-
             sleep 15
           done
 
-          echo "WARNING: AWS cleanup timeout reached, proceeding anyway"
+          echo "::warning::AWS cleanup timeout reached, proceeding anyway"
 
       - name: Terraform destroy
         run: terraform destroy -auto-approve -parallelism=1

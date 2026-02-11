@@ -1,26 +1,36 @@
 variable "aws_region" {
-  description = "AWS region for the backend resources"
+  description = "AWS region to deploy bootstrap resources into"
   type        = string
-  default     = "ca-central-1"
 }
 
-variable "state_bucket_name" {
-  description = "S3 bucket name for Terraform remote state (must be globally unique)"
+variable "name_prefix" {
+  description = "Prefix for naming bootstrap resources"
   type        = string
-  default     = "devsecops-testing-tfstate-enoch-2026"
+}
+
+variable "tfstate_bucket_name" {
+  description = "Name of S3 bucket for Terraform state"
+  type        = string
+}
+
+variable "logs_bucket_name" {
+  description = "Name of S3 bucket for security / ALB / WAF logs"
+  type        = string
+}
+
+variable "logs_bucket_force_destroy" {
+  description = "Whether the logs bucket should be force-destroyed (NOT recommended for prod)"
+  type        = bool
+  default     = false
 }
 
 variable "lock_table_name" {
-  description = "DynamoDB table name for Terraform state locking"
+  description = "Name of DynamoDB table for Terraform state locking"
   type        = string
-  default     = "devsecops-testing-tflocks"
 }
 
 variable "tags" {
-  description = "Common tags"
+  description = "Standard tags applied to all resources"
   type        = map(string)
-  default = {
-    Project   = "devsecops-project1"
-    ManagedBy = "Terraform"
-  }
+  default     = {}
 }
