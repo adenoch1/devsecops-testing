@@ -57,7 +57,7 @@ resource "aws_kms_alias" "logs" {
   target_key_id = aws_kms_key.logs.key_id
 }
 
-# ✅ FIX IS HERE: allow DynamoDB service to use this CMK (scoped to account + region)
+# ✅ FIX: Expand key policy so GitHubActions roles can use the key *via DynamoDB* (scoped)
 resource "aws_kms_key" "dynamodb" {
   description             = "KMS CMK for Terraform lock DynamoDB table"
   deletion_window_in_days = 10
@@ -75,7 +75,7 @@ resource "aws_kms_key" "dynamodb" {
         Resource  = "*"
       },
 
-      # Allow DynamoDB (service) to use the key for encryption/decryption at rest
+      # Allow DynamoDB (service) to use the key (table encryption at rest)
       {
         Sid    = "AllowDynamoDBUseOfTheKey"
         Effect = "Allow"
@@ -95,6 +95,31 @@ resource "aws_kms_key" "dynamodb" {
           StringEquals = {
             "aws:SourceAccount" = data.aws_caller_identity.current.account_id
             "kms:ViaService"    = "dynamodb.${data.aws_region.current.name}.amazonaws.com"
+          }
+        }
+      },
+
+      # ✅ NEW: Allow GitHubActions roles in this account to use the key, but ONLY via DynamoDB in this region
+      # This fixes "Error acquiring the state lock" (kms:Decrypt denied) during PutItem/GetItem on lock table.
+      {
+        Sid      = "AllowGitHubActionsRolesViaDynamoDB"
+        Effect   = "Allow"
+        Principal = { AWS = "*" }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+            "kms:ViaService"    = "dynamodb.${data.aws_region.current.name}.amazonaws.com"
+          }
+          StringLike = {
+            "aws:PrincipalArn" = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:role/GitHubActions-*"
           }
         }
       }
