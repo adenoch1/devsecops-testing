@@ -57,7 +57,6 @@ resource "aws_kms_alias" "logs" {
   target_key_id = aws_kms_key.logs.key_id
 }
 
-# DynamoDB CMK for Terraform lock table
 resource "aws_kms_key" "dynamodb" {
   description             = "KMS CMK for Terraform lock DynamoDB table"
   deletion_window_in_days = 10
@@ -134,7 +133,6 @@ resource "aws_s3_bucket_ownership_controls" "tfstate" {
   }
 }
 
-# Deny insecure transport to state bucket
 resource "aws_s3_bucket_policy" "tfstate" {
   bucket = aws_s3_bucket.tfstate.id
   policy = jsonencode({
@@ -159,14 +157,17 @@ resource "aws_s3_bucket_policy" "tfstate" {
 
 # -----------------------------
 # S3 Access Logs Bucket (target for server access logging)
-# NOTE: Server access logging delivery requires ACLs on the target bucket.
+# IMPORTANT:
+# - Your existing bucket has ACLs already, and AWS blocks switching to BucketOwnerEnforced in-place.
+# - We force a NEW bucket by changing the name (v2), then enable BucketOwnerEnforced on the new bucket.
 # -----------------------------
 resource "aws_s3_bucket" "access_logs" {
-  bucket        = "${var.name_prefix}-s3-access-logs-${data.aws_caller_identity.current.account_id}"
+  # v2 forces a fresh bucket so ownership controls can be applied without ACL conflicts
+  bucket        = "${var.name_prefix}-s3-access-logs-v2-${data.aws_caller_identity.current.account_id}"
   force_destroy = var.logs_bucket_force_destroy
 
   tags = merge(var.tags, {
-    Name = "${var.name_prefix}-s3-access-logs"
+    Name = "${var.name_prefix}-s3-access-logs-v2"
     Role = "s3-access-logs"
   })
 }
@@ -180,20 +181,12 @@ resource "aws_s3_bucket_public_access_block" "access_logs" {
   restrict_public_buckets = true
 }
 
-# Allow ACLs so S3 can deliver server access logs
 resource "aws_s3_bucket_ownership_controls" "access_logs" {
   bucket = aws_s3_bucket.access_logs.id
 
   rule {
-    object_ownership = "BucketOwnerPreferred"
+    object_ownership = "BucketOwnerEnforced"
   }
-}
-
-resource "aws_s3_bucket_acl" "access_logs" {
-  bucket = aws_s3_bucket.access_logs.id
-  acl    = "log-delivery-write"
-
-  depends_on = [aws_s3_bucket_ownership_controls.access_logs]
 }
 
 resource "aws_s3_bucket_versioning" "access_logs" {
@@ -216,9 +209,33 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "access_logs" {
   }
 }
 
-# Deny insecure transport to access logs bucket
+resource "aws_s3_bucket_lifecycle_configuration" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
+
+  rule {
+    id     = "access-logs-lifecycle"
+    status = "Enabled"
+
+    filter {}
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    transition {
+      days          = 30
+      storage_class = "STANDARD_IA"
+    }
+
+    expiration {
+      days = 365
+    }
+  }
+}
+
 resource "aws_s3_bucket_policy" "access_logs" {
   bucket = aws_s3_bucket.access_logs.id
+
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -234,9 +251,51 @@ resource "aws_s3_bucket_policy" "access_logs" {
         Condition = {
           Bool = { "aws:SecureTransport" = "false" }
         }
+      },
+      {
+        Sid    = "S3ServerAccessLogsAclCheck"
+        Effect = "Allow"
+        Principal = {
+          Service = "logging.s3.amazonaws.com"
+        }
+        Action   = ["s3:GetBucketAcl"]
+        Resource = aws_s3_bucket.access_logs.arn
+        Condition = {
+          StringEquals = {
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+          }
+          ArnLike = {
+            "aws:SourceArn" = [
+              aws_s3_bucket.tfstate.arn,
+              aws_s3_bucket.logs.arn
+            ]
+          }
+        }
+      },
+      {
+        Sid    = "S3ServerAccessLogsWrite"
+        Effect = "Allow"
+        Principal = {
+          Service = "logging.s3.amazonaws.com"
+        }
+        Action   = ["s3:PutObject"]
+        Resource = "${aws_s3_bucket.access_logs.arn}/*"
+        Condition = {
+          StringEquals = {
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+          }
+          ArnLike = {
+            "aws:SourceArn" = [
+              aws_s3_bucket.tfstate.arn,
+              aws_s3_bucket.logs.arn
+            ]
+          }
+        }
       }
     ]
   })
+
+  depends_on = [aws_s3_bucket_ownership_controls.access_logs]
 }
 
 # -----------------------------
@@ -317,7 +376,6 @@ resource "aws_s3_bucket_ownership_controls" "logs" {
   }
 }
 
-# Deny insecure transport to logs bucket
 resource "aws_s3_bucket_policy" "logs" {
   bucket = aws_s3_bucket.logs.id
   policy = jsonencode({
@@ -340,13 +398,18 @@ resource "aws_s3_bucket_policy" "logs" {
   })
 }
 
-# Enable server access logging for buckets (CKV_AWS_18)
+# -----------------------------
+# Enable server access logging for buckets
+# -----------------------------
 resource "aws_s3_bucket_logging" "tfstate" {
   bucket        = aws_s3_bucket.tfstate.id
   target_bucket = aws_s3_bucket.access_logs.id
   target_prefix = "tfstate/"
 
-  depends_on = [aws_s3_bucket_acl.access_logs]
+  depends_on = [
+    aws_s3_bucket_policy.access_logs,
+    aws_s3_bucket_ownership_controls.access_logs
+  ]
 }
 
 resource "aws_s3_bucket_logging" "logs" {
@@ -354,5 +417,8 @@ resource "aws_s3_bucket_logging" "logs" {
   target_bucket = aws_s3_bucket.access_logs.id
   target_prefix = "logs/"
 
-  depends_on = [aws_s3_bucket_acl.access_logs]
+  depends_on = [
+    aws_s3_bucket_policy.access_logs,
+    aws_s3_bucket_ownership_controls.access_logs
+  ]
 }
