@@ -164,7 +164,7 @@ jobs:
 
   ######################################################
   # DNS Smoke Test (non-blocking if FQDN isn't ready)
-  ######################################################
+  #####################################################
   dns_smoke:
     name: DNS Smoke Test (non-blocking)
     needs: deploy
