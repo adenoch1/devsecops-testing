@@ -1,10 +1,8 @@
 ############################################################
-# ECS MODULE - main.tf (FULL, corrected for Terraform syntax)
-# Fixes included:
-# - WAF override_action blocks are multi-line (Terraform requires nested blocks on own lines)
-# - Trivy/TFSec: drop_invalid_header_fields, public LB ignore, restricted egress
-# - Checkov: ALB deletion protection, S3 access logging, lifecycle abort uploads,
-#            Firehose SSE CMK, readonlyRootFilesystem
+# ECS MODULE - main.tf (FULL, updated for remaining Checkov)
+# Fixes:
+# - CKV2_AWS_61: add lifecycle configuration to waf_logs_access bucket
+# - CKV_AWS_145: encrypt waf_logs_access bucket with KMS by default
 ############################################################
 
 data "aws_region" "current" {}
@@ -58,9 +56,6 @@ resource "aws_security_group" "alb" {
   tags = merge(var.tags, { Name = "${var.name_prefix}-alb-sg" })
 }
 
-# ECS Tasks SG:
-# - Inbound only from ALB SG on app port
-# - Outbound restricted to VPC CIDR (for VPC endpoints / controlled egress)
 resource "aws_security_group" "ecs_tasks" {
   name        = "${var.name_prefix}-tasks-sg"
   description = "ECS tasks security group"
@@ -114,10 +109,7 @@ resource "aws_lb" "this" {
   security_groups    = [aws_security_group.alb.id]
   subnets            = var.public_subnet_ids
 
-  # CKV_AWS_150
   enable_deletion_protection = true
-
-  # AWS-0052: drop invalid/unknown headers
   drop_invalid_header_fields = true
 
   access_logs {
@@ -260,7 +252,47 @@ resource "aws_wafv2_web_acl_association" "alb" {
 # WAF Logging: Firehose -> S3 (encrypted)
 # ------------------------------------------------------------
 
-# Access logs bucket for WAF logs bucket (CKV_AWS_18)
+# KMS key for S3 buckets (waf logs + access logs) to satisfy CKV_AWS_145
+resource "aws_kms_key" "s3_logs" {
+  description             = "KMS CMK for S3 logging buckets (WAF logs + access logs)"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "EnableRootPermissions"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      },
+      {
+        Sid       = "AllowS3UseOfKey"
+        Effect    = "Allow"
+        Principal = { Service = "s3.amazonaws.com" }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-s3-logs-kms" })
+}
+
+resource "aws_kms_alias" "s3_logs" {
+  name          = "alias/${var.name_prefix}-s3-logs"
+  target_key_id = aws_kms_key.s3_logs.key_id
+}
+
+# Access logs bucket for WAF logs bucket
 resource "aws_s3_bucket" "waf_logs_access" {
   bucket        = "${var.name_prefix}-waf-logs-access-${data.aws_caller_identity.current.account_id}"
   force_destroy = true
@@ -285,12 +317,32 @@ resource "aws_s3_bucket_versioning" "waf_logs_access" {
   }
 }
 
+# CKV_AWS_145: KMS encryption by default (not AES256)
 resource "aws_s3_bucket_server_side_encryption_configuration" "waf_logs_access" {
   bucket = aws_s3_bucket.waf_logs_access.id
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.s3_logs.arn
+    }
+  }
+}
+
+# CKV2_AWS_61: lifecycle for access logs bucket (keep it short)
+resource "aws_s3_bucket_lifecycle_configuration" "waf_logs_access" {
+  bucket = aws_s3_bucket.waf_logs_access.id
+
+  rule {
+    id     = "access-logs-lifecycle"
+    status = "Enabled"
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    expiration {
+      days = 30
     }
   }
 }
@@ -326,12 +378,12 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "waf_logs" {
   rule {
     apply_server_side_encryption_by_default {
       sse_algorithm     = "aws:kms"
-      kms_master_key_id = aws_kms_key.waf_logs.arn
+      kms_master_key_id = aws_kms_key.s3_logs.arn
     }
   }
 }
 
-# CKV_AWS_18: enable access logging on the WAF logs bucket
+# enable access logging on the WAF logs bucket
 resource "aws_s3_bucket_logging" "waf_logs" {
   bucket        = aws_s3_bucket.waf_logs.id
   target_bucket = aws_s3_bucket.waf_logs_access.id
@@ -345,7 +397,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "waf_logs" {
     id     = "waf-logs-lifecycle"
     status = "Enabled"
 
-    # CKV_AWS_300: abort failed multipart uploads
     abort_incomplete_multipart_upload {
       days_after_initiation = 7
     }
@@ -361,6 +412,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "waf_logs" {
   }
 }
 
+# Firehose delivery + KMS for Firehose itself
 resource "aws_iam_role" "firehose_waf" {
   name = "${var.name_prefix}-firehose-waf"
 
@@ -524,7 +576,6 @@ resource "aws_kinesis_firehose_delivery_stream" "waf" {
   name        = "${var.name_prefix}-waf-logs"
   destination = "extended_s3"
 
-  # CKV_AWS_240/241: Firehose stream encryption with CMK
   server_side_encryption {
     enabled  = true
     key_type = "CUSTOMER_MANAGED_CMK"
@@ -541,9 +592,7 @@ resource "aws_kinesis_firehose_delivery_stream" "waf" {
     buffering_interval = 300
 
     compression_format = "GZIP"
-
-    # Encrypt objects written to S3 with the CMK
-    kms_key_arn = aws_kms_key.waf_logs.arn
+    kms_key_arn        = aws_kms_key.waf_logs.arn
   }
 
   tags = merge(var.tags, { Name = "${var.name_prefix}-waf-firehose" })
@@ -588,7 +637,6 @@ resource "aws_ecs_task_definition" "app" {
       image     = local.container_image
       essential = true
 
-      # CKV_AWS_336
       readonlyRootFilesystem = true
 
       portMappings = [
