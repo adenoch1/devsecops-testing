@@ -313,7 +313,7 @@ resource "aws_kms_key" "waf_logs" {
 
           StringEquals = {
             "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
-            "kms:ViaService"    = "firehose.${data.aws_region.current.name}.amazonaws.com"
+            "kms:ViaService"    = "firehose.${data.aws_region.current.id}.amazonaws.com"
           }
         }
       },
