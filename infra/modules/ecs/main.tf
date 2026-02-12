@@ -521,12 +521,52 @@ resource "aws_kms_key" "waf_logs" {
             "kms:ViaService"    = "firehose.${data.aws_region.current.region}.amazonaws.com"
           }
         }
+      },
+
+      # ✅ ADD: allow StartDeliveryStreamEncryption flow even when kms:ViaService is not present
+      # (Firehose encryption start can call KMS without the ViaService context)
+      {
+        Sid       = "AllowFirehoseRoleUseOfKeyNoViaService"
+        Effect    = "Allow"
+        Principal = { AWS = aws_iam_role.firehose_waf.arn }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
+          }
+        }
+      },
+      {
+        Sid       = "AllowFirehoseRoleGrantNoViaService"
+        Effect    = "Allow"
+        Principal = { AWS = aws_iam_role.firehose_waf.arn }
+        Action = [
+          "kms:CreateGrant",
+          "kms:ListGrants",
+          "kms:RevokeGrant",
+          "kms:RetireGrant"
+        ]
+        Resource = "*"
+        Condition = {
+          Bool = { "kms:GrantIsForAWSResource" = "true" }
+          StringEquals = {
+            "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
+          }
+        }
       }
     ]
   })
 
   tags = merge(var.tags, { Name = "${var.name_prefix}-waf-logs-kms" })
 }
+
 
 resource "aws_kms_alias" "waf_logs" {
   name          = "alias/${var.name_prefix}-waf-logs"
