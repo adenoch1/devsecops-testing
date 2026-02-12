@@ -447,6 +447,48 @@ resource "aws_kms_key" "waf_logs" {
         Resource  = "*"
       },
 
+      # ✅ Allow Terraform (GitHub Actions role) to manage/use this key during provisioning
+      {
+        Sid    = "AllowTerraformRoleUseOfKey"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::476532114555:role/GitHubActions-Terraform-DevSecOps-Role"
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
+          }
+        }
+      },
+      {
+        Sid    = "AllowTerraformRoleCreateGrant"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::476532114555:role/GitHubActions-Terraform-DevSecOps-Role"
+        }
+        Action = [
+          "kms:CreateGrant",
+          "kms:ListGrants",
+          "kms:RevokeGrant",
+          "kms:RetireGrant"
+        ]
+        Resource = "*"
+        Condition = {
+          Bool = { "kms:GrantIsForAWSResource" = "true" }
+          StringEquals = {
+            "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
+          }
+        }
+      },
+
       # Firehose service principal (normal path)
       {
         Sid       = "AllowFirehoseServiceUseOfKey"
@@ -487,7 +529,7 @@ resource "aws_kms_key" "waf_logs" {
         }
       },
 
-      # ✅ Firehose service principal (StartDeliveryStreamEncryption can be missing kms:ViaService)
+      # Firehose service principal (StartDeliveryStreamEncryption can be missing kms:ViaService)
       {
         Sid       = "AllowFirehoseServiceUseOfKeyNoViaService"
         Effect    = "Allow"
@@ -570,6 +612,7 @@ resource "aws_kms_key" "waf_logs" {
   tags = merge(var.tags, { Name = "${var.name_prefix}-waf-logs-kms" })
 }
 
+
 resource "aws_kms_alias" "waf_logs" {
   name          = "alias/${var.name_prefix}-waf-logs"
   target_key_id = aws_kms_key.waf_logs.key_id
@@ -606,7 +649,8 @@ resource "aws_iam_role_policy" "firehose_waf" {
           "kms:Decrypt",
           "kms:ReEncrypt*",
           "kms:GenerateDataKey*",
-          "kms:DescribeKey"
+          "kms:DescribeKey",
+          "kms:CreateGrant"
         ]
         Resource = [aws_kms_key.waf_logs.arn]
       }
