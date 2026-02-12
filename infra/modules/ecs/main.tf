@@ -447,7 +447,7 @@ resource "aws_kms_key" "waf_logs" {
         Resource  = "*"
       },
 
-      # Keep your existing service principal statements (unchanged)
+      # Firehose service principal (normal path)
       {
         Sid       = "AllowFirehoseServiceUseOfKey"
         Effect    = "Allow"
@@ -487,7 +487,45 @@ resource "aws_kms_key" "waf_logs" {
         }
       },
 
-      # ✅ UPDATED: allow the ROLE to use the key WITHOUT kms:ViaService (encryption start path)
+      # ✅ Firehose service principal (StartDeliveryStreamEncryption can be missing kms:ViaService)
+      {
+        Sid       = "AllowFirehoseServiceUseOfKeyNoViaService"
+        Effect    = "Allow"
+        Principal = { Service = "firehose.amazonaws.com" }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
+          }
+        }
+      },
+      {
+        Sid       = "AllowFirehoseServiceCreateGrantNoViaService"
+        Effect    = "Allow"
+        Principal = { Service = "firehose.amazonaws.com" }
+        Action = [
+          "kms:CreateGrant",
+          "kms:ListGrants",
+          "kms:RevokeGrant",
+          "kms:RetireGrant"
+        ]
+        Resource = "*"
+        Condition = {
+          Bool = { "kms:GrantIsForAWSResource" = "true" }
+          StringEquals = {
+            "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
+          }
+        }
+      },
+
+      # Firehose delivery role (allow use)
       {
         Sid       = "AllowFirehoseRoleUseOfKey"
         Effect    = "Allow"
@@ -507,7 +545,7 @@ resource "aws_kms_key" "waf_logs" {
         }
       },
 
-      # ✅ UPDATED: allow GRANTS for the ROLE WITHOUT kms:ViaService (this is what the error is about)
+      # Firehose delivery role (allow grant management)
       {
         Sid       = "AllowFirehoseRoleCreateGrant"
         Effect    = "Allow"
@@ -531,8 +569,6 @@ resource "aws_kms_key" "waf_logs" {
 
   tags = merge(var.tags, { Name = "${var.name_prefix}-waf-logs-kms" })
 }
-
-
 
 resource "aws_kms_alias" "waf_logs" {
   name          = "alias/${var.name_prefix}-waf-logs"
