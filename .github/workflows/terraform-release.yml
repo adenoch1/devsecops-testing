@@ -162,9 +162,9 @@ jobs:
       - name: Show outputs
         run: terraform output || true
 
-  ########################################################
-  # DNS Smoke Test (non-blocking if FQDN isn't ready)
   ######################################################
+  # DNS Smoke Test (non-blocking if FQDN isn't ready)
+  #####################################################
   dns_smoke:
     name: DNS Smoke Test (non-blocking)
     needs: deploy

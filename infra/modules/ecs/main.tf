@@ -279,6 +279,7 @@ resource "aws_kms_key" "waf_logs" {
         Action    = "kms:*"
         Resource  = "*"
       },
+      # Allow Firehose to use this CMK for delivery stream encryption (including grants)
       {
         Sid       = "AllowFirehoseUseOfKey"
         Effect    = "Allow"
@@ -293,6 +294,23 @@ resource "aws_kms_key" "waf_logs" {
         Resource = "*"
       },
       {
+        Sid       = "AllowFirehoseCreateGrant"
+        Effect    = "Allow"
+        Principal = { Service = "firehose.amazonaws.com" }
+        Action = [
+          "kms:CreateGrant",
+          "kms:ListGrants",
+          "kms:RevokeGrant"
+        ]
+        Resource = "*"
+        Condition = {
+          Bool = {
+            "kms:GrantIsForAWSResource" = "true"
+          }
+        }
+      },
+      # If you enable SSE-KMS on any S3 buckets that store WAF logs, S3 also needs grant permissions.
+      {
         Sid       = "AllowS3UseOfKey"
         Effect    = "Allow"
         Principal = { Service = "s3.amazonaws.com" }
@@ -304,10 +322,25 @@ resource "aws_kms_key" "waf_logs" {
           "kms:DescribeKey"
         ]
         Resource = "*"
+      },
+      {
+        Sid       = "AllowS3CreateGrant"
+        Effect    = "Allow"
+        Principal = { Service = "s3.amazonaws.com" }
+        Action = [
+          "kms:CreateGrant",
+          "kms:ListGrants",
+          "kms:RevokeGrant"
+        ]
+        Resource = "*"
+        Condition = {
+          Bool = {
+            "kms:GrantIsForAWSResource" = "true"
+          }
+        }
       }
     ]
   })
-
   tags = merge(var.tags, { Name = "${var.name_prefix}-waf-logs-kms" })
 }
 
