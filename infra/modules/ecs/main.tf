@@ -1,18 +1,17 @@
 ############################################################
-# ECS MODULE - main.tf (FULL, corrected HCL)
-# - Public ALB (HTTPS) + WAFv2 + WAF Logging (Firehose->S3)
-# - ECS Fargate service behind ALB
-# - Security groups without dependency cycles
+# ECS MODULE - main.tf (FULL, corrected for Trivy/TFSec)
+# Fixes:
+# - AWS-0052: drop_invalid_header_fields = true on ALB
+# - AWS-0053: Public ALB is intentional -> tfsec ignore on resource
+# - AWS-0104: Removed 0.0.0.0/0 egress; restrict egress to VPC CIDR
+#   (expects VPC endpoints / controlled egress pattern used in Week 3)
 ############################################################
 
 data "aws_region" "current" {}
 data "aws_caller_identity" "current" {}
 
 locals {
-  # Module variables are standardized on `app_port` (see variables.tf)
-  app_port = var.app_port
-
-  # Build the full image reference from repo URL + tag
+  app_port        = var.app_port
   container_image = "${var.ecr_repository_url}:${var.container_image_tag}"
 }
 
@@ -32,7 +31,7 @@ resource "aws_cloudwatch_log_group" "app" {
 # -----------------------------
 # Security Groups (no cycle)
 # -----------------------------
-# ALB SG: internet ingress 443, egress restricted to VPC CIDR on app port (breaks SG cycle)
+# ALB SG: internet ingress 443, egress restricted to VPC CIDR on app port
 #tfsec:ignore:aws-ec2-no-public-ingress-sgr
 resource "aws_security_group" "alb" {
   name        = "${var.name_prefix}-alb-sg"
@@ -59,7 +58,9 @@ resource "aws_security_group" "alb" {
   tags = merge(var.tags, { Name = "${var.name_prefix}-alb-sg" })
 }
 
-# ECS Tasks SG: only allow inbound from ALB SG on app port
+# ECS Tasks SG:
+# - Inbound only from ALB SG on app port
+# - Outbound restricted to VPC CIDR (best practice when using VPC endpoints / controlled egress)
 resource "aws_security_group" "ecs_tasks" {
   name        = "${var.name_prefix}-tasks-sg"
   description = "ECS tasks security group"
@@ -73,12 +74,30 @@ resource "aws_security_group" "ecs_tasks" {
     security_groups = [aws_security_group.alb.id]
   }
 
+  # DNS to VPC resolver / internal DNS (kept in VPC CIDR)
   egress {
-    description = "Outbound to anywhere (needed for ECR, logs, etc.)"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+    description = "DNS to VPC"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "udp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  egress {
+    description = "DNS to VPC (tcp fallback)"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  # HTTPS to VPC (for interface endpoints: ECR api/dkr, Logs, STS, etc.)
+  egress {
+    description = "HTTPS to VPC"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
   }
 
   tags = merge(var.tags, { Name = "${var.name_prefix}-tasks-sg" })
@@ -87,6 +106,9 @@ resource "aws_security_group" "ecs_tasks" {
 # ------------------------------------------------------------
 # Application Load Balancer (ALB) + Target Group + Listener (HTTPS)
 # ------------------------------------------------------------
+
+# Public ALB is intentional in this project (internet-facing entrypoint)
+#tfsec:ignore:aws-0053
 resource "aws_lb" "this" {
   name                       = "${var.name_prefix}-alb"
   internal                   = false
@@ -94,6 +116,9 @@ resource "aws_lb" "this" {
   security_groups            = [aws_security_group.alb.id]
   subnets                    = var.public_subnet_ids
   enable_deletion_protection = false
+
+  # AWS-0052: drop invalid/unknown headers
+  drop_invalid_header_fields = true
 
   access_logs {
     bucket  = var.alb_log_bucket_name
@@ -235,7 +260,6 @@ resource "aws_wafv2_web_acl_association" "alb" {
 # WAF Logging: Firehose -> S3 (encrypted)
 # ------------------------------------------------------------
 
-# S3 bucket for WAF logs
 resource "aws_s3_bucket" "waf_logs" {
   bucket        = "${var.name_prefix}-waf-logs-${data.aws_caller_identity.current.account_id}"
   force_destroy = true
@@ -289,7 +313,23 @@ resource "aws_s3_bucket_lifecycle_configuration" "waf_logs" {
   }
 }
 
-# KMS key for WAF logs (Firehose needs permissions)
+resource "aws_iam_role" "firehose_waf" {
+  name = "${var.name_prefix}-firehose-waf"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = { Service = "firehose.amazonaws.com" }
+        Action    = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-firehose-waf-role" })
+}
+
 resource "aws_kms_key" "waf_logs" {
   description             = "KMS CMK for WAF logs (Firehose)"
   deletion_window_in_days = 7
@@ -299,7 +339,6 @@ resource "aws_kms_key" "waf_logs" {
     Version = "2012-10-17"
     Id      = "key-default-1"
     Statement = [
-      # Root account full access
       {
         Sid       = "EnableIAMUserPermissions"
         Effect    = "Allow"
@@ -307,13 +346,10 @@ resource "aws_kms_key" "waf_logs" {
         Action    = "kms:*"
         Resource  = "*"
       },
-      # Allow Firehose service in this account to use the key via Firehose
       {
-        Sid    = "AllowFirehoseServiceUseOfKey"
-        Effect = "Allow"
-        Principal = {
-          Service = "firehose.amazonaws.com"
-        }
+        Sid       = "AllowFirehoseServiceUseOfKey"
+        Effect    = "Allow"
+        Principal = { Service = "firehose.amazonaws.com" }
         Action = [
           "kms:Encrypt",
           "kms:Decrypt",
@@ -329,13 +365,10 @@ resource "aws_kms_key" "waf_logs" {
           }
         }
       },
-      # Allow Firehose to create grants
       {
-        Sid    = "AllowFirehoseCreateGrant"
-        Effect = "Allow"
-        Principal = {
-          Service = "firehose.amazonaws.com"
-        }
+        Sid       = "AllowFirehoseCreateGrant"
+        Effect    = "Allow"
+        Principal = { Service = "firehose.amazonaws.com" }
         Action = [
           "kms:CreateGrant",
           "kms:ListGrants",
@@ -344,17 +377,13 @@ resource "aws_kms_key" "waf_logs" {
         ]
         Resource = "*"
         Condition = {
-          Bool = {
-            "kms:GrantIsForAWSResource" = "true"
-          }
-
+          Bool = { "kms:GrantIsForAWSResource" = "true" }
           StringEquals = {
             "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
             "kms:ViaService"    = "firehose.${data.aws_region.current.region}.amazonaws.com"
           }
         }
       },
-      # Allow the Firehose delivery role to use this CMK (KMS sometimes evaluates the IAM role principal during SSE enablement)
       {
         Sid       = "AllowFirehoseRoleUseOfKey"
         Effect    = "Allow"
@@ -386,43 +415,10 @@ resource "aws_kms_key" "waf_logs" {
         ]
         Resource = "*"
         Condition = {
-          Bool = {
-            "kms:GrantIsForAWSResource" = "true"
-          }
+          Bool = { "kms:GrantIsForAWSResource" = "true" }
           StringEquals = {
             "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
             "kms:ViaService"    = "firehose.${data.aws_region.current.region}.amazonaws.com"
-          }
-        }
-      },
-      # If you enable SSE-KMS on any S3 buckets that store WAF logs, S3 also needs grant permissions.
-      {
-        Sid       = "AllowS3UseOfKey"
-        Effect    = "Allow"
-        Principal = { Service = "s3.amazonaws.com" }
-        Action = [
-          "kms:Encrypt",
-          "kms:Decrypt",
-          "kms:ReEncrypt*",
-          "kms:GenerateDataKey*",
-          "kms:DescribeKey"
-        ]
-        Resource = "*"
-      },
-      {
-        Sid       = "AllowS3CreateGrant"
-        Effect    = "Allow"
-        Principal = { Service = "s3.amazonaws.com" }
-        Action = [
-          "kms:CreateGrant",
-          "kms:ListGrants",
-          "kms:RevokeGrant",
-          "kms:RetireGrant"
-        ]
-        Resource = "*"
-        Condition = {
-          Bool = {
-            "kms:GrantIsForAWSResource" = "true"
           }
         }
       }
@@ -435,26 +431,6 @@ resource "aws_kms_key" "waf_logs" {
 resource "aws_kms_alias" "waf_logs" {
   name          = "alias/${var.name_prefix}-waf-logs"
   target_key_id = aws_kms_key.waf_logs.key_id
-}
-
-# IAM role for Firehose delivery stream
-resource "aws_iam_role" "firehose_waf" {
-  name = "${var.name_prefix}-firehose-waf"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Principal = {
-          Service = "firehose.amazonaws.com"
-        }
-        Action = "sts:AssumeRole"
-      }
-    ]
-  })
-
-  tags = merge(var.tags, { Name = "${var.name_prefix}-firehose-waf-role" })
 }
 
 resource "aws_iam_role_policy" "firehose_waf" {
@@ -491,14 +467,6 @@ resource "aws_iam_role_policy" "firehose_waf" {
           "kms:DescribeKey"
         ]
         Resource = [aws_kms_key.waf_logs.arn]
-      },
-      {
-        Sid    = "AllowLogs"
-        Effect = "Allow"
-        Action = [
-          "logs:PutLogEvents"
-        ]
-        Resource = "*"
       }
     ]
   })
@@ -518,14 +486,6 @@ resource "aws_kinesis_firehose_delivery_stream" "waf" {
     buffering_interval = 300
 
     compression_format = "GZIP"
-
-    cloudwatch_logging_options {
-      enabled         = true
-      log_group_name  = aws_cloudwatch_log_group.app.name
-      log_stream_name = "firehose"
-    }
-
-    s3_backup_mode = "Disabled"
 
     kms_key_arn = aws_kms_key.waf_logs.arn
   }
