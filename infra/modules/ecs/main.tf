@@ -8,6 +8,14 @@
 data "aws_region" "current" {}
 data "aws_caller_identity" "current" {}
 
+locals {
+  # Module variables are standardized on `app_port` (see variables.tf)
+  app_port = var.app_port
+
+  # Build the full image reference from repo URL + tag
+  container_image = "${var.ecr_repository_url}:${var.container_image_tag}"
+}
+
 # --------------------------------
 # CloudWatch Logs (encrypted with KMS)
 # --------------------------------
@@ -42,8 +50,8 @@ resource "aws_security_group" "alb" {
 
   egress {
     description = "ALB to targets in VPC on app port"
-    from_port   = var.container_port
-    to_port     = var.container_port
+    from_port   = local.app_port
+    to_port     = local.app_port
     protocol    = "tcp"
     cidr_blocks = [var.vpc_cidr]
   }
@@ -59,8 +67,8 @@ resource "aws_security_group" "ecs_tasks" {
 
   ingress {
     description     = "App traffic from ALB SG"
-    from_port       = var.container_port
-    to_port         = var.container_port
+    from_port       = local.app_port
+    to_port         = local.app_port
     protocol        = "tcp"
     security_groups = [aws_security_group.alb.id]
   }
@@ -88,7 +96,7 @@ resource "aws_lb" "this" {
   enable_deletion_protection = false
 
   access_logs {
-    bucket  = var.alb_logs_bucket
+    bucket  = var.alb_log_bucket_name
     enabled = true
     prefix  = var.alb_log_prefix
   }
@@ -98,7 +106,7 @@ resource "aws_lb" "this" {
 
 resource "aws_lb_target_group" "app" {
   name        = "${var.name_prefix}-tg"
-  port        = var.container_port
+  port        = local.app_port
   protocol    = "HTTP"
   target_type = "ip"
   vpc_id      = var.vpc_id
@@ -151,7 +159,7 @@ resource "aws_wafv2_web_acl" "alb" {
 
   rule {
     name     = "AWSManagedRulesCommonRuleSet"
-    priority = 1
+    priority = 10
 
     override_action {
       none {}
@@ -166,7 +174,51 @@ resource "aws_wafv2_web_acl" "alb" {
 
     visibility_config {
       cloudwatch_metrics_enabled = true
-      metric_name                = "${var.name_prefix}-common"
+      metric_name                = "AWSManagedRulesCommonRuleSet"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  rule {
+    name     = "AWSManagedRulesKnownBadInputsRuleSet"
+    priority = 20
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesKnownBadInputsRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "AWSManagedRulesKnownBadInputsRuleSet"
+      sampled_requests_enabled   = true
+    }
+  }
+
+  rule {
+    name     = "AWSManagedRulesAmazonIpReputationList"
+    priority = 30
+
+    override_action {
+      none {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesAmazonIpReputationList"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "AWSManagedRulesAmazonIpReputationList"
       sampled_requests_enabled   = true
     }
   }
@@ -180,30 +232,88 @@ resource "aws_wafv2_web_acl_association" "alb" {
 }
 
 # ------------------------------------------------------------
-# WAF Logging (CKV2_AWS_31) + hardening for scanners
-# WAF logs -> Kinesis Firehose -> S3
+# WAF Logging: Firehose -> S3 (encrypted)
 # ------------------------------------------------------------
 
+# S3 bucket for WAF logs
+resource "aws_s3_bucket" "waf_logs" {
+  bucket        = "${var.name_prefix}-waf-logs-${data.aws_caller_identity.current.account_id}"
+  force_destroy = true
+
+  tags = merge(var.tags, {
+    Name = "${var.name_prefix}-waf-logs"
+  })
+}
+
+resource "aws_s3_bucket_public_access_block" "waf_logs" {
+  bucket                  = aws_s3_bucket.waf_logs.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_versioning" "waf_logs" {
+  bucket = aws_s3_bucket.waf_logs.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "waf_logs" {
+  bucket = aws_s3_bucket.waf_logs.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.waf_logs.arn
+    }
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "waf_logs" {
+  bucket = aws_s3_bucket.waf_logs.id
+
+  rule {
+    id     = "waf-logs-lifecycle"
+    status = "Enabled"
+
+    expiration {
+      days = var.lifecycle_expire_days
+    }
+
+    transition {
+      days          = var.lifecycle_glacier_days
+      storage_class = "GLACIER"
+    }
+  }
+}
+
+# KMS key for WAF logs (Firehose needs permissions)
 resource "aws_kms_key" "waf_logs" {
-  description             = "CMK for WAF logs bucket and Firehose encryption"
-  deletion_window_in_days = 10
+  description             = "KMS CMK for WAF logs (Firehose)"
+  deletion_window_in_days = 7
   enable_key_rotation     = true
 
   policy = jsonencode({
     Version = "2012-10-17"
+    Id      = "key-default-1"
     Statement = [
+      # Root account full access
       {
-        Sid       = "EnableRootPermissions"
+        Sid       = "EnableIAMUserPermissions"
         Effect    = "Allow"
         Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
         Action    = "kms:*"
         Resource  = "*"
       },
-      # Allow Firehose to use this CMK for delivery stream encryption (including grants)
+      # Allow Firehose service in this account to use the key via Firehose
       {
-        Sid       = "AllowFirehoseUseOfKey"
-        Effect    = "Allow"
-        Principal = { Service = "firehose.amazonaws.com" }
+        Sid    = "AllowFirehoseServiceUseOfKey"
+        Effect = "Allow"
+        Principal = {
+          Service = "firehose.amazonaws.com"
+        }
         Action = [
           "kms:Encrypt",
           "kms:Decrypt",
@@ -212,11 +322,20 @@ resource "aws_kms_key" "waf_logs" {
           "kms:DescribeKey"
         ]
         Resource = "*"
+        Condition = {
+          StringEquals = {
+            "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
+            "kms:ViaService"    = "firehose.${data.aws_region.current.region}.amazonaws.com"
+          }
+        }
       },
+      # Allow Firehose to create grants
       {
-        Sid       = "AllowFirehoseCreateGrant"
-        Effect    = "Allow"
-        Principal = { Service = "firehose.amazonaws.com" }
+        Sid    = "AllowFirehoseCreateGrant"
+        Effect = "Allow"
+        Principal = {
+          Service = "firehose.amazonaws.com"
+        }
         Action = [
           "kms:CreateGrant",
           "kms:ListGrants",
@@ -231,7 +350,7 @@ resource "aws_kms_key" "waf_logs" {
 
           StringEquals = {
             "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
-            "kms:ViaService"    = "firehose.${data.aws_region.current.name}.amazonaws.com"
+            "kms:ViaService"    = "firehose.${data.aws_region.current.region}.amazonaws.com"
           }
         }
       },
@@ -251,7 +370,7 @@ resource "aws_kms_key" "waf_logs" {
         Condition = {
           StringEquals = {
             "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
-            "kms:ViaService"    = "firehose.${data.aws_region.current.name}.amazonaws.com"
+            "kms:ViaService"    = "firehose.${data.aws_region.current.region}.amazonaws.com"
           }
         }
       },
@@ -272,7 +391,7 @@ resource "aws_kms_key" "waf_logs" {
           }
           StringEquals = {
             "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
-            "kms:ViaService"    = "firehose.${data.aws_region.current.name}.amazonaws.com"
+            "kms:ViaService"    = "firehose.${data.aws_region.current.region}.amazonaws.com"
           }
         }
       },
@@ -309,6 +428,7 @@ resource "aws_kms_key" "waf_logs" {
       }
     ]
   })
+
   tags = merge(var.tags, { Name = "${var.name_prefix}-waf-logs-kms" })
 }
 
@@ -317,149 +437,18 @@ resource "aws_kms_alias" "waf_logs" {
   target_key_id = aws_kms_key.waf_logs.key_id
 }
 
-resource "aws_s3_bucket" "waf_logs_access" {
-  bucket        = "${var.name_prefix}-waf-logs-access-${data.aws_caller_identity.current.account_id}"
-  force_destroy = true
-  tags          = merge(var.tags, { Name = "${var.name_prefix}-waf-logs-access" })
-}
-
-resource "aws_s3_bucket_public_access_block" "waf_logs_access" {
-  bucket                  = aws_s3_bucket.waf_logs_access.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_ownership_controls" "waf_logs_access" {
-  bucket = aws_s3_bucket.waf_logs_access.id
-
-  rule {
-    object_ownership = "BucketOwnerEnforced"
-  }
-}
-
-resource "aws_s3_bucket_versioning" "waf_logs_access" {
-  bucket = aws_s3_bucket.waf_logs_access.id
-
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "waf_logs_access" {
-  bucket = aws_s3_bucket.waf_logs_access.id
-
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
-  }
-}
-
-resource "aws_s3_bucket" "waf_logs" {
-  bucket        = "${var.name_prefix}-waf-logs-${data.aws_caller_identity.current.account_id}"
-  force_destroy = true
-  tags          = merge(var.tags, { Name = "${var.name_prefix}-waf-logs" })
-}
-
-resource "aws_s3_bucket_public_access_block" "waf_logs" {
-  bucket                  = aws_s3_bucket.waf_logs.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_ownership_controls" "waf_logs" {
-  bucket = aws_s3_bucket.waf_logs.id
-
-  rule {
-    object_ownership = "BucketOwnerEnforced"
-  }
-}
-
-resource "aws_s3_bucket_versioning" "waf_logs" {
-  bucket = aws_s3_bucket.waf_logs.id
-
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "waf_logs" {
-  bucket = aws_s3_bucket.waf_logs.id
-
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm     = "aws:kms"
-      kms_master_key_id = aws_kms_key.waf_logs.arn
-    }
-  }
-}
-
-resource "aws_s3_bucket_logging" "waf_logs" {
-  bucket        = aws_s3_bucket.waf_logs.id
-  target_bucket = aws_s3_bucket.waf_logs_access.id
-  target_prefix = "access-logs/"
-}
-
-data "aws_iam_policy_document" "waf_logs_bucket" {
-  statement {
-    sid     = "AWSLogDeliveryWrite"
-    effect  = "Allow"
-    actions = ["s3:PutObject"]
-
-    principals {
-      type        = "Service"
-      identifiers = ["delivery.logs.amazonaws.com"]
-    }
-
-    resources = ["${aws_s3_bucket.waf_logs.arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"]
-
-    condition {
-      test     = "StringEquals"
-      variable = "s3:x-amz-acl"
-      values   = ["bucket-owner-full-control"]
-    }
-  }
-
-  statement {
-    sid     = "AWSLogDeliveryAclCheck"
-    effect  = "Allow"
-    actions = ["s3:GetBucketAcl"]
-
-    principals {
-      type        = "Service"
-      identifiers = ["delivery.logs.amazonaws.com"]
-    }
-
-    resources = [aws_s3_bucket.waf_logs.arn]
-  }
-}
-
-resource "aws_s3_bucket_policy" "waf_logs" {
-  bucket = aws_s3_bucket.waf_logs.id
-  policy = data.aws_iam_policy_document.waf_logs_bucket.json
-}
-
-resource "aws_s3_bucket_notification" "waf_logs" {
-  bucket = aws_s3_bucket.waf_logs.id
-
-  depends_on = [aws_s3_bucket_policy.waf_logs]
-}
-
+# IAM role for Firehose delivery stream
 resource "aws_iam_role" "firehose_waf" {
-  name = "${var.name_prefix}-firehose-waf-role"
+  name = "${var.name_prefix}-firehose-waf"
 
   assume_role_policy = jsonencode({
-    Version = "2012-10-17",
+    Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow",
+        Effect = "Allow"
         Principal = {
           Service = "firehose.amazonaws.com"
-        },
+        }
         Action = "sts:AssumeRole"
       }
     ]
@@ -468,75 +457,77 @@ resource "aws_iam_role" "firehose_waf" {
   tags = merge(var.tags, { Name = "${var.name_prefix}-firehose-waf-role" })
 }
 
-data "aws_iam_policy_document" "firehose_waf" {
-  statement {
-    sid    = "AllowS3"
-    effect = "Allow"
-    actions = [
-      "s3:AbortMultipartUpload",
-      "s3:GetBucketLocation",
-      "s3:GetObject",
-      "s3:ListBucket",
-      "s3:ListBucketMultipartUploads",
-      "s3:PutObject"
-    ]
-    resources = [
-      aws_s3_bucket.waf_logs.arn,
-      "${aws_s3_bucket.waf_logs.arn}/*"
-    ]
-  }
-
-  statement {
-    sid    = "AllowKMS"
-    effect = "Allow"
-    actions = [
-      "kms:Encrypt",
-      "kms:Decrypt",
-      "kms:ReEncrypt*",
-      "kms:GenerateDataKey*",
-      "kms:DescribeKey",
-      "kms:CreateGrant",
-      "kms:ListGrants",
-      "kms:RevokeGrant"
-    ]
-    resources = [aws_kms_key.waf_logs.arn]
-    condition {
-      test     = "Bool"
-      variable = "kms:GrantIsForAWSResource"
-      values   = ["true"]
-    }
-  }
-}
-
 resource "aws_iam_role_policy" "firehose_waf" {
-  name   = "${var.name_prefix}-firehose-waf-policy"
-  role   = aws_iam_role.firehose_waf.id
-  policy = data.aws_iam_policy_document.firehose_waf.json
+  name = "${var.name_prefix}-firehose-waf-policy"
+  role = aws_iam_role.firehose_waf.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowS3Put"
+        Effect = "Allow"
+        Action = [
+          "s3:AbortMultipartUpload",
+          "s3:GetBucketLocation",
+          "s3:GetObject",
+          "s3:ListBucket",
+          "s3:ListBucketMultipartUploads",
+          "s3:PutObject"
+        ]
+        Resource = [
+          aws_s3_bucket.waf_logs.arn,
+          "${aws_s3_bucket.waf_logs.arn}/*"
+        ]
+      },
+      {
+        Sid    = "AllowKMS"
+        Effect = "Allow"
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = [aws_kms_key.waf_logs.arn]
+      },
+      {
+        Sid    = "AllowLogs"
+        Effect = "Allow"
+        Action = [
+          "logs:PutLogEvents"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
 }
 
 resource "aws_kinesis_firehose_delivery_stream" "waf" {
-  # WAF logging requires the Firehose stream name to start with "aws-waf-logs-"
-  # (AWS validation fails otherwise, even if the ARN looks correct).
-  name        = "aws-waf-logs-${var.name_prefix}"
+  name        = "${var.name_prefix}-waf-logs"
   destination = "extended_s3"
 
-  server_side_encryption {
-    enabled  = true
-    key_type = "CUSTOMER_MANAGED_CMK"
-    key_arn  = aws_kms_key.waf_logs.arn
-  }
-
   extended_s3_configuration {
-    role_arn   = aws_iam_role.firehose_waf.arn
-    bucket_arn = aws_s3_bucket.waf_logs.arn
-
-    prefix              = "waf-logs/"
-    error_output_prefix = "waf-errors/"
+    role_arn            = aws_iam_role.firehose_waf.arn
+    bucket_arn          = aws_s3_bucket.waf_logs.arn
+    prefix              = "waf-logs/!{timestamp:yyyy}/!{timestamp:MM}/!{timestamp:dd}/"
+    error_output_prefix = "waf-logs-errors/!{firehose:error-output-type}/!{timestamp:yyyy}/!{timestamp:MM}/!{timestamp:dd}/"
 
     buffering_size     = 5
     buffering_interval = 300
 
     compression_format = "GZIP"
+
+    cloudwatch_logging_options {
+      enabled         = true
+      log_group_name  = aws_cloudwatch_log_group.app.name
+      log_stream_name = "firehose"
+    }
+
+    s3_backup_mode = "Disabled"
+
+    kms_key_arn = aws_kms_key.waf_logs.arn
   }
 
   tags = merge(var.tags, { Name = "${var.name_prefix}-waf-firehose" })
@@ -578,12 +569,12 @@ resource "aws_ecs_task_definition" "app" {
   container_definitions = jsonencode([
     {
       name      = "app"
-      image     = var.container_image
+      image     = local.container_image
       essential = true
 
       portMappings = [
         {
-          containerPort = var.container_port
+          containerPort = local.app_port
           protocol      = "tcp"
         }
       ]
@@ -592,7 +583,7 @@ resource "aws_ecs_task_definition" "app" {
         logDriver = "awslogs"
         options = {
           awslogs-group         = aws_cloudwatch_log_group.app.name
-          awslogs-region        = data.aws_region.current.name
+          awslogs-region        = data.aws_region.current.region
           awslogs-stream-prefix = "ecs"
         }
       }
@@ -620,7 +611,7 @@ resource "aws_ecs_service" "app" {
   load_balancer {
     target_group_arn = aws_lb_target_group.app.arn
     container_name   = "app"
-    container_port   = var.container_port
+    container_port   = local.app_port
   }
 
   depends_on = [aws_lb_listener.https]
