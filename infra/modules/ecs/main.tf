@@ -310,6 +310,47 @@ resource "aws_kms_key" "waf_logs" {
           }
         }
       },
+      # Allow the Firehose delivery role to use this CMK (KMS sometimes evaluates the IAM role principal during SSE enablement)
+      {
+        Sid       = "AllowFirehoseRoleUseOfKey"
+        Effect    = "Allow"
+        Principal = { AWS = aws_iam_role.firehose_waf.arn }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
+            "kms:ViaService"    = "firehose.${data.aws_region.current.name}.amazonaws.com"
+          }
+        }
+      },
+      {
+        Sid       = "AllowFirehoseRoleCreateGrant"
+        Effect    = "Allow"
+        Principal = { AWS = aws_iam_role.firehose_waf.arn }
+        Action = [
+          "kms:CreateGrant",
+          "kms:ListGrants",
+          "kms:RevokeGrant",
+          "kms:RetireGrant"
+        ]
+        Resource = "*"
+        Condition = {
+          Bool = {
+            "kms:GrantIsForAWSResource" = "true"
+          }
+          StringEquals = {
+            "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
+            "kms:ViaService"    = "firehose.${data.aws_region.current.name}.amazonaws.com"
+          }
+        }
+      },
       # If you enable SSE-KMS on any S3 buckets that store WAF logs, S3 also needs grant permissions.
       {
         Sid       = "AllowS3UseOfKey"
@@ -586,9 +627,17 @@ data "aws_iam_policy_document" "firehose_waf" {
       "kms:Decrypt",
       "kms:ReEncrypt*",
       "kms:GenerateDataKey*",
-      "kms:DescribeKey"
+      "kms:DescribeKey",
+      "kms:CreateGrant",
+      "kms:ListGrants",
+      "kms:RevokeGrant"
     ]
     resources = [aws_kms_key.waf_logs.arn]
+    condition {
+      test     = "Bool"
+      variable = "kms:GrantIsForAWSResource"
+      values   = ["true"]
+    }
   }
 }
 
