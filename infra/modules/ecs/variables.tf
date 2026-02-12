@@ -34,6 +34,12 @@ variable "app_port" {
   type        = number
 }
 
+variable "health_check_path" {
+  description = "Health check path for the ALB target group"
+  type        = string
+  default     = "/health"
+}
+
 variable "acm_certificate_arn" {
   description = "ACM certificate ARN for HTTPS listener"
   type        = string
@@ -69,6 +75,15 @@ variable "ecr_repository_url" {
 variable "container_image_tag" {
   description = "Container image tag to deploy"
   type        = string
+}
+
+variable "container_environment" {
+  description = "Environment variables for the ECS container"
+  type = list(object({
+    name  = string
+    value = string
+  }))
+  default = []
 }
 
 variable "task_cpu" {
