@@ -301,12 +301,19 @@ resource "aws_kms_key" "waf_logs" {
           "kms:CreateGrant",
           "kms:ListGrants",
           "kms:RevokeGrant",
+          "kms:RetireGrant",
           "kms:RetireGrant"
         ]
         Resource = "*"
         Condition = {
           Bool = {
             "kms:GrantIsForAWSResource" = "true"
+          }
+
+
+          StringEquals = {
+            "kms:CallerAccount" = "${data.aws_caller_identity.current.account_id}"
+            "kms:ViaService"    = "firehose.${data.aws_region.current.name}.amazonaws.com"
           }
         }
       },
