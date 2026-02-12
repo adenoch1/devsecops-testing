@@ -300,7 +300,8 @@ resource "aws_kms_key" "waf_logs" {
         Action = [
           "kms:CreateGrant",
           "kms:ListGrants",
-          "kms:RevokeGrant"
+          "kms:RevokeGrant",
+          "kms:RetireGrant"
         ]
         Resource = "*"
         Condition = {
@@ -330,7 +331,8 @@ resource "aws_kms_key" "waf_logs" {
         Action = [
           "kms:CreateGrant",
           "kms:ListGrants",
-          "kms:RevokeGrant"
+          "kms:RevokeGrant",
+          "kms:RetireGrant"
         ]
         Resource = "*"
         Condition = {
