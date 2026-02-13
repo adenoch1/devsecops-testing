@@ -7,6 +7,7 @@
 
 data "aws_region" "current" {}
 data "aws_caller_identity" "current" {}
+data "aws_partition" "current" {}
 
 locals {
   app_port        = var.app_port
@@ -691,11 +692,15 @@ resource "aws_wafv2_web_acl_logging_configuration" "alb" {
   resource_arn = aws_wafv2_web_acl.alb.arn
 
   log_destination_configs = [
-    aws_kinesis_firehose_delivery_stream.waf.arn
+    "arn:${data.aws_partition.current.partition}:firehose:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:deliverystream/${aws_kinesis_firehose_delivery_stream.waf.name}"
   ]
 
-  depends_on = [aws_wafv2_web_acl.alb]
+  depends_on = [
+    aws_wafv2_web_acl.alb,
+    aws_kinesis_firehose_delivery_stream.waf
+  ]
 }
+
 
 # ------------------------------------------------------------
 # ECS Cluster + Task + Service (Fargate)
