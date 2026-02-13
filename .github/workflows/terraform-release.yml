@@ -154,10 +154,54 @@ jobs:
         run: |
           terraform plan \
             -out=tfplan.deploy \
-            -var="container_image_tag=${{ needs.build_image.outputs.deploy_tag }}"
+            -var="container_image_tag=${{ needs.build_image.outputs.deploy_tag }}" \
+            -var="desired_count=1"
 
       - name: Terraform apply (deploy)
         run: terraform apply -auto-approve tfplan.deploy
+
+      - name: Wait for ECS/ALB targets to become healthy (best-effort)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # 503 from ALB commonly means: no healthy targets in the target group.
+          # We bootstrap infra with desired_count=0, so deploy MUST scale up (desired_count=1).
+          # This step waits for ECS to stabilize (if outputs exist), and prints target health (if TG output exists).
+
+          if terraform output -raw ecs_cluster_name >/dev/null 2>&1 && terraform output -raw ecs_service_name >/dev/null 2>&1; then
+            CLUSTER="$(terraform output -raw ecs_cluster_name)"
+            SERVICE="$(terraform output -raw ecs_service_name)"
+            echo "Waiting for ECS service to become stable: ${CLUSTER}/${SERVICE}"
+            aws ecs wait services-stable --cluster "${CLUSTER}" --services "${SERVICE}" || true
+          else
+            echo "ECS outputs not found (ecs_cluster_name/ecs_service_name). Skipping ECS wait."
+          fi
+
+          if terraform output -raw alb_target_group_arn >/dev/null 2>&1; then
+            TG_ARN="$(terraform output -raw alb_target_group_arn)"
+            echo "Checking target health for: ${TG_ARN}"
+
+            for i in {1..30}; do
+              STATES="$(aws elbv2 describe-target-health --target-group-arn "${TG_ARN}" --query "TargetHealthDescriptions[].TargetHealth.State" --output text || true)"
+              echo "Attempt ${i} — target states: ${STATES:-<none>}"
+
+              if echo "${STATES}" | grep -q "healthy"; then
+                echo "Target group has healthy targets ✅"
+                exit 0
+              fi
+              sleep 10
+            done
+
+            echo "::warning::No healthy targets observed yet. If you still see 503, check:"
+            echo "::warning::  - ECS task is running and passing container health check"
+            echo "::warning::  - Target group port matches container port"
+            echo "::warning::  - Health check path/port/protocol match the app"
+            echo "::warning::  - Security groups allow ALB -> tasks"
+            exit 0
+          else
+            echo "Target group output not found (alb_target_group_arn). Skipping target health check."
+          fi
 
       - name: Show outputs
         run: terraform output || true
