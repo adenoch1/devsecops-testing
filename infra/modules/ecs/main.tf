@@ -681,7 +681,7 @@ resource "aws_kinesis_firehose_delivery_stream" "waf" {
 
     compression_format = "GZIP"
 
-    # ✅ Destination (S3 object) encryption with CMK as well
+    # ✅ Destination (S3 object) encryption with CMK as well.
     kms_key_arn = aws_kms_key.waf_logs.arn
   }
 
