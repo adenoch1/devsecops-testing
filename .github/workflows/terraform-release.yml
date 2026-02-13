@@ -102,7 +102,7 @@ jobs:
             echo "ALB DNS output not found. Add an output like: output \"alb_dns_name\" { value = aws_lb.<name>.dns_name }"
           fi
 
-  ########################################################
+  #######################################################
   # Build & Push Image (ECR) — after infra exists
   ########################################################
   build_image:
@@ -164,7 +164,7 @@ jobs:
 
   ######################################################
   # DNS Smoke Test (non-blocking if FQDN isn't ready)
-  #####################################################
+  ######################################################
   dns_smoke:
     name: DNS Smoke Test (non-blocking)
     needs: deploy
@@ -249,80 +249,79 @@ jobs:
           echo "::warning::HTTPS smoke test did not pass yet. Check DNS/CNAME/TLS/ALB target health."
           exit 0
 
- ######################################################
-# Destroy (gated) — appears after deploy/smoke, waits for approval
-########################################################
-destroy:
-  name: Destroy (gated)
-  needs: dns_smoke
-  if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.action == 'destroy') }}
-  runs-on: ubuntu-latest
-  environment: destroy
+  ######################################################
+  # Destroy (gated) — appears after deploy/smoke, waits for approval
+  ######################################################
+  destroy:
+    name: Destroy (gated)
+    needs: dns_smoke
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.action == 'destroy') }}
+    runs-on: ubuntu-latest
+    environment: destroy
 
-  defaults:
-    run:
-      working-directory: ${{ env.WORKDIR }}
+    defaults:
+      run:
+        working-directory: ${{ env.WORKDIR }}
 
-  steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Configure AWS credentials (OIDC)
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        role-to-assume: ${{ secrets.AWS_ROLE_ARN_APPLY }}
-        aws-region: ${{ secrets.AWS_REGION }}
-        audience: sts.amazonaws.com
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_APPLY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          audience: sts.amazonaws.com
 
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v3
-      with:
-        terraform_version: ${{ env.TF_VERSION }}
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
 
-    - name: Terraform init
-      run: terraform init -input=false
+      - name: Terraform init
+        run: terraform init -input=false
 
-    - name: Disable ALB deletion protection (controlled teardown)
-      shell: bash
-      run: |
-        set -euo pipefail
-        if terraform output -raw alb_arn >/dev/null 2>&1; then
-          ALB_ARN="$(terraform output -raw alb_arn)"
-          echo "Disabling deletion protection for: $ALB_ARN"
-          aws elbv2 modify-load-balancer-attributes \
-            --load-balancer-arn "$ALB_ARN" \
-            --attributes Key=deletion_protection.enabled,Value=false
-        else
-          echo "No alb_arn output found. Skipping."
-        fi
+      - name: Disable ALB deletion protection (controlled teardown)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if terraform output -raw alb_arn >/dev/null 2>&1; then
+            ALB_ARN="$(terraform output -raw alb_arn)"
+            echo "Disabling deletion protection for: $ALB_ARN"
+            aws elbv2 modify-load-balancer-attributes \
+              --load-balancer-arn "$ALB_ARN" \
+              --attributes Key=deletion_protection.enabled,Value=false
+          else
+            echo "No alb_arn output found. Skipping."
+          fi
 
-    - name: Wait for AWS to release public IP mappings (IGW safety)
-      shell: bash
-      run: |
-        set -euo pipefail
-        if ! terraform output -raw vpc_id >/dev/null 2>&1; then
-          echo "VPC ID not found in terraform outputs. Skipping wait."
-          exit 0
-        fi
-
-        VPC_ID="$(terraform output -raw vpc_id)"
-        echo "Waiting for AWS cleanup in VPC: $VPC_ID"
-
-        for i in {1..40}; do
-          COUNT="$(aws ec2 describe-network-interfaces \
-            --filters Name=vpc-id,Values="$VPC_ID" \
-            --query "length(NetworkInterfaces[?Association.PublicIp!=null])" \
-            --output text)"
-          echo "Attempt $i — public ENIs with public IPs: $COUNT"
-          if [ "$COUNT" = "0" ]; then
-            echo "AWS cleanup complete ✅"
+      - name: Wait for AWS to release public IP mappings (IGW safety)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! terraform output -raw vpc_id >/dev/null 2>&1; then
+            echo "VPC ID not found in terraform outputs. Skipping wait."
             exit 0
           fi
-          sleep 15
-        done
 
-        echo "::warning::AWS cleanup timeout reached, proceeding anyway"
+          VPC_ID="$(terraform output -raw vpc_id)"
+          echo "Waiting for AWS cleanup in VPC: $VPC_ID"
 
-    - name: Terraform destroy
-      run: terraform destroy -auto-approve -parallelism=1
+          for i in {1..40}; do
+            COUNT="$(aws ec2 describe-network-interfaces \
+              --filters Name=vpc-id,Values="$VPC_ID" \
+              --query "length(NetworkInterfaces[?Association.PublicIp!=null])" \
+              --output text)"
+            echo "Attempt $i — public ENIs with public IPs: $COUNT"
+            if [ "$COUNT" = "0" ]; then
+              echo "AWS cleanup complete ✅"
+              exit 0
+            fi
+            sleep 15
+          done
 
+          echo "::warning::AWS cleanup timeout reached, proceeding anyway"
+
+      - name: Terraform destroy
+        run: terraform destroy -auto-approve -parallelism=1
