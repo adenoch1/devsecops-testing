@@ -702,7 +702,7 @@ resource "aws_wafv2_web_acl_logging_configuration" "alb" {
 }
 
 
-# ------------------------------------------------------------
+# ----------------------------------------------------------
 # ECS Cluster + Task + Service (Fargate)
 # ------------------------------------------------------------
 resource "aws_ecs_cluster" "this" {

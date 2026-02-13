@@ -282,19 +282,35 @@ jobs:
       - name: Terraform init
         run: terraform init -input=false
 
-      - name: Disable ALB deletion protection (controlled teardown)
+      - name: Disable ALB deletion protection (controlled teardown) - safe on reruns
         shell: bash
         run: |
           set -euo pipefail
-          if terraform output -raw alb_arn >/dev/null 2>&1; then
-            ALB_ARN="$(terraform output -raw alb_arn)"
-            echo "Disabling deletion protection for: $ALB_ARN"
-            aws elbv2 modify-load-balancer-attributes \
-              --load-balancer-arn "$ALB_ARN" \
-              --attributes Key=deletion_protection.enabled,Value=false
-          else
-            echo "No alb_arn output found. Skipping."
+
+          # Find ALBs created by this stack via tags (preferred) or name.
+          # Tag key/value assumes you tag with var.tags and Name="${var.name_prefix}-alb" or similar.
+          # We'll try tag:Name first, then fall back to name contains var.name_prefix.
+
+          PREFIX="${{ env.WORKDIR }}" # not used, just keeping structure
+          NAME_PREFIX="devsecops-flask-dev"   # <-- if you have a TF output/var for name_prefix, replace this with it
+
+          echo "Searching for ALB(s) to disable deletion protection..."
+
+          ALB_ARNS="$(aws elbv2 describe-load-balancers \
+            --query "LoadBalancers[?contains(LoadBalancerName, \`${NAME_PREFIX}\`)].LoadBalancerArn" \
+            --output text || true)"
+
+          if [ -z "${ALB_ARNS}" ] || [ "${ALB_ARNS}" = "None" ]; then
+            echo "No matching ALB found. Skipping deletion protection disable."
+            exit 0
           fi
+
+          for ALB_ARN in ${ALB_ARNS}; do
+            echo "Disabling deletion protection for: ${ALB_ARN}"
+            aws elbv2 modify-load-balancer-attributes \
+              --load-balancer-arn "${ALB_ARN}" \
+              --attributes Key=deletion_protection.enabled,Value=false
+          done
 
       - name: Wait for AWS to release public IP mappings (IGW safety)
         shell: bash
