@@ -57,7 +57,7 @@ resource "aws_security_group" "alb" {
   tags = merge(var.tags, { Name = "${var.name_prefix}-alb-sg" })
 }
 
-#checkov:skip=CKV_AWS_382:Allow HTTPS egress for ECS tasks to reach ECR/CloudWatch/STS via NAT (project is ephemeral; restricted to 443 only)
+
 resource "aws_security_group" "ecs_tasks" {
   name        = "${var.name_prefix}-tasks-sg"
   description = "ECS tasks security group"
@@ -78,7 +78,8 @@ resource "aws_security_group" "ecs_tasks" {
     protocol    = "udp"
     cidr_blocks = [var.vpc_cidr]
   }
-
+  #trivy:ignore:AWS-0104  # Required HTTPS egress for ECS tasks to pull from ECR and write to CloudWatch Logs via NAT (ephemeral project)
+  #checkov:skip=CKV_AWS_382:Required HTTPS egress for ECS tasks to pull images and write logs
   egress {
     description = "DNS to VPC (tcp fallback)"
     from_port   = 53
