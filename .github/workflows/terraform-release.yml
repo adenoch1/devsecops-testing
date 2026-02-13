@@ -165,10 +165,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 503 from ALB commonly means: no healthy targets in the target group.
-          # We bootstrap infra with desired_count=0, so deploy MUST scale up (desired_count=1).
-          # This step waits for ECS to stabilize (if outputs exist), and prints target health (if TG output exists).
-
           if terraform output -raw ecs_cluster_name >/dev/null 2>&1 && terraform output -raw ecs_service_name >/dev/null 2>&1; then
             CLUSTER="$(terraform output -raw ecs_cluster_name)"
             SERVICE="$(terraform output -raw ecs_service_name)"
@@ -222,10 +218,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Priority:
-          # 1) workflow_dispatch input fqdn
-          # 2) environment/repo secret FQDN (for push-to-main)
-          # If none -> warn and skip
           FQDN_INPUT="${{ inputs.fqdn }}"
           SECRET_FQDN="${{ secrets.FQDN }}"
 
@@ -293,7 +285,7 @@ jobs:
           echo "::warning::HTTPS smoke test did not pass yet. Check DNS/CNAME/TLS/ALB target health."
           exit 0
 
-  ######################################################
+  #####################################################
   # Destroy (gated) — appears after deploy/smoke, waits for approval
   ######################################################
   destroy:
@@ -331,12 +323,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Find ALBs created by this stack via tags (preferred) or name.
-          # Tag key/value assumes you tag with var.tags and Name="${var.name_prefix}-alb" or similar.
-          # We'll try tag:Name first, then fall back to name contains var.name_prefix.
-
-          PREFIX="${{ env.WORKDIR }}" # not used, just keeping structure
-          NAME_PREFIX="devsecops-flask-dev"   # <-- if you have a TF output/var for name_prefix, replace this with it
+          PREFIX="${{ env.WORKDIR }}"
+          NAME_PREFIX="devsecops-flask-dev"
 
           echo "Searching for ALB(s) to disable deletion protection..."
 
@@ -360,17 +348,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if ! terraform output -raw vpc_id >/dev/null 2>&1; then
-            echo "VPC ID not found in terraform outputs. Skipping wait."
+
+          # Safely read vpc_id. If outputs/state are missing, skip the wait instead of crashing.
+          VPC_ID=""
+          if terraform output -raw vpc_id >/dev/null 2>&1; then
+            VPC_ID="$(terraform output -raw vpc_id 2>/dev/null || true)"
+          fi
+
+          if [ -z "${VPC_ID}" ] || [ "${VPC_ID}" = "null" ]; then
+            echo "::warning::VPC ID not found in terraform outputs (state missing or no outputs). Skipping wait."
             exit 0
           fi
 
-          VPC_ID="$(terraform output -raw vpc_id)"
-          echo "Waiting for AWS cleanup in VPC: $VPC_ID"
+          echo "Waiting for AWS cleanup in VPC: ${VPC_ID}"
 
           for i in {1..40}; do
             COUNT="$(aws ec2 describe-network-interfaces \
-              --filters Name=vpc-id,Values="$VPC_ID" \
+              --filters Name=vpc-id,Values="${VPC_ID}" \
               --query "length(NetworkInterfaces[?Association.PublicIp!=null])" \
               --output text)"
             echo "Attempt $i — public ENIs with public IPs: $COUNT"
