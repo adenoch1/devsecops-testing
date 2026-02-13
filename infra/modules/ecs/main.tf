@@ -57,6 +57,7 @@ resource "aws_security_group" "alb" {
   tags = merge(var.tags, { Name = "${var.name_prefix}-alb-sg" })
 }
 
+#checkov:skip=CKV_AWS_382:Allow HTTPS egress for ECS tasks to reach ECR/CloudWatch/STS via NAT (project is ephemeral; restricted to 443 only)
 resource "aws_security_group" "ecs_tasks" {
   name        = "${var.name_prefix}-tasks-sg"
   description = "ECS tasks security group"
