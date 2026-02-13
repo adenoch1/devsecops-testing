@@ -707,7 +707,7 @@ resource "aws_wafv2_web_acl_logging_configuration" "alb" {
 
 # ----------------------------------------------------------
 # ECS Cluster + Task + Service (Fargate)
-# ----------------------------------------------------------
+# --------------------------------------------------------
 resource "aws_ecs_cluster" "this" {
   name = "${var.name_prefix}-cluster"
 
@@ -765,6 +765,7 @@ resource "aws_ecs_service" "app" {
   task_definition = aws_ecs_task_definition.app.arn
   desired_count   = var.desired_count
   launch_type     = "FARGATE"
+  health_check_grace_period_seconds = 60
 
   network_configuration {
     subnets          = var.private_subnet_ids

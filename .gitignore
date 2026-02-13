@@ -22,4 +22,5 @@ venv/
 
 # Local env files
 .env
+infra.zip
 
