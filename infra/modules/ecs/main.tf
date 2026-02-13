@@ -78,7 +78,7 @@ resource "aws_security_group" "ecs_tasks" {
     protocol    = "udp"
     cidr_blocks = [var.vpc_cidr]
   }
-  
+
   egress {
     description = "DNS to VPC (tcp fallback)"
     from_port   = 53
