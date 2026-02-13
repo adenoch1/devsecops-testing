@@ -660,7 +660,7 @@ resource "aws_iam_role_policy" "firehose_waf" {
 }
 
 resource "aws_kinesis_firehose_delivery_stream" "waf" {
-  name        = "${var.name_prefix}-waf-logs"
+  name        = "aws-waf-logs-${var.name_prefix}-waf-logs"
   destination = "extended_s3"
 
   # ✅ Stream-level encryption (required by CKV_AWS_240/241)
@@ -700,9 +700,6 @@ resource "aws_wafv2_web_acl_logging_configuration" "alb" {
     aws_kinesis_firehose_delivery_stream.waf
   ]
 }
-
-
-
 
 
 # ------------------------------------------------------------
