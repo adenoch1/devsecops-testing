@@ -689,10 +689,11 @@ resource "aws_kinesis_firehose_delivery_stream" "waf" {
 }
 
 resource "aws_wafv2_web_acl_logging_configuration" "alb" {
+  provider     = aws
   resource_arn = aws_wafv2_web_acl.alb.arn
 
   log_destination_configs = [
-    "arn:${data.aws_partition.current.partition}:firehose:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:deliverystream/${aws_kinesis_firehose_delivery_stream.waf.name}"
+    aws_kinesis_firehose_delivery_stream.waf.arn
   ]
 
   depends_on = [
@@ -700,6 +701,7 @@ resource "aws_wafv2_web_acl_logging_configuration" "alb" {
     aws_kinesis_firehose_delivery_stream.waf
   ]
 }
+
 
 
 
