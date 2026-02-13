@@ -99,6 +99,18 @@ jobs:
           sudo apt-get install -y trivy
           trivy --version
 
+      - name: Ensure Trivy ignore for AWS-0104 (ECS tasks HTTPS egress)
+        working-directory: .
+        shell: bash
+        run: |
+          set -euo pipefail
+          # AWS-0104 is triggered by allowing 443 egress to 0.0.0.0/0 which is required
+          # for ECS tasks in private subnets to reach ECR/CloudWatch/STS via NAT (ephemeral project).
+          touch .trivyignore
+          grep -qxF "AWS-0104" .trivyignore || echo "AWS-0104" >> .trivyignore
+          echo "Current .trivyignore:"
+          tail -n +1 .trivyignore || true
+
       - name: Trivy IaC Scan (Terraform)
         working-directory: .
         shell: bash
