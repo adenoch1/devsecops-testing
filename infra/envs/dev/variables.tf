@@ -32,7 +32,7 @@ variable "app_port" {
 variable "container_image_tag" {
   type        = string
   description = "Container image tag"
-  default     = "latest"
+  default     = "bootstrap"
 }
 
 variable "task_cpu" {
