@@ -154,7 +154,7 @@ jobs:
         run: |
           terraform plan \
             -out=tfplan.deploy \
-            -var="container_image_tag=${{ needs.build_image.outputs.deploy_tag || needs.build_image.outputs.image_tag || needs.build_image.outputs.tag || github.sha }}" \
+            -var="container_image_tag=${{ github.sha }}" \
             -var="desired_count=1"
 
       - name: Terraform apply (deploy)
