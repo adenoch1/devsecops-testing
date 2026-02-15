@@ -102,7 +102,7 @@ resource "aws_security_group" "ecs_tasks" {
 
 # -----------------------------------------------------------
 # Application Load Balancer (ALB) + Target Group + Listener (HTTPS)
-# ------------------------------------------------------------
+# ----------------------------------------------------------
 
 # Public ALB is intentional in this project (internet-facing entrypoint)
 #tfsec:ignore:aws-0053
@@ -126,11 +126,12 @@ resource "aws_lb" "this" {
 }
 
 resource "aws_lb_target_group" "app" {
-  name        = "${var.name_prefix}-tg"
-  port        = local.app_port
-  protocol    = "HTTP"
-  target_type = "ip"
-  vpc_id      = var.vpc_id
+  name                 = "${var.name_prefix}-tg"
+  port                 = local.app_port
+  protocol             = "HTTP"
+  target_type          = "ip"
+  vpc_id               = var.vpc_id
+  deregistration_delay = 30
 
   health_check {
     enabled             = true
@@ -760,11 +761,14 @@ resource "aws_ecs_task_definition" "app" {
 }
 
 resource "aws_ecs_service" "app" {
-  name            = "${var.name_prefix}-svc"
-  cluster         = aws_ecs_cluster.this.id
-  task_definition = aws_ecs_task_definition.app.arn
-  desired_count   = var.desired_count
-  launch_type     = "FARGATE"
+  name                               = "${var.name_prefix}-svc"
+  cluster                            = aws_ecs_cluster.this.id
+  task_definition                    = aws_ecs_task_definition.app.arn
+  desired_count                      = var.desired_count
+  launch_type                        = "FARGATE"
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+  health_check_grace_period_seconds  = 60
 
   network_configuration {
     subnets          = var.private_subnet_ids
