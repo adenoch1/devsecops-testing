@@ -32,7 +32,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     TMPDIR=/tmp \
-    GUNICORN_CMD_ARGS="--worker-tmp-dir /tmp"
+    # Ensure gunicorn uses a writable temp dir (in addition to CLI flag below)
+    GUNICORN_CMD_ARGS="--worker-tmp-dir /tmp" \
+    # Avoid python trying to write __pycache__ into read-only directories
+    PYTHONPYCACHEPREFIX=/tmp/pycache
 
 WORKDIR /app
 
@@ -59,10 +62,11 @@ RUN cat > /usr/local/bin/entrypoint.sh <<'EOF' \
 set -eu
 
 # Ensure temp dirs exist. In ECS with volume-mounted /tmp, permissions can be restrictive.
-mkdir -p /tmp /var/tmp /usr/tmp
+mkdir -p /tmp /var/tmp /usr/tmp /tmp/pycache
 
 # Sticky-bit so any user can create temp files safely
 chmod 1777 /tmp /var/tmp /usr/tmp || true
+chmod 777 /tmp/pycache || true
 
 # Drop privileges and run
 exec gosu appuser "$@"
@@ -71,4 +75,6 @@ EOF
 EXPOSE 5000
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["gunicorn", "-b", "0.0.0.0:5000", "app:app"]
+
+# Also pass --worker-tmp-dir explicitly (belt + suspenders)
+CMD ["gunicorn", "-b", "0.0.0.0:5000", "--worker-tmp-dir", "/tmp", "app:app"]

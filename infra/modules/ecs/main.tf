@@ -713,7 +713,7 @@ resource "aws_wafv2_web_acl_logging_configuration" "alb" {
 
 # --------------------------------------------------------
 # ECS Cluster + Task + Service (Fargate)
-# ----------------------------------------------------------
+# --------------------------------------------------------
 resource "aws_ecs_cluster" "this" {
   name = "${var.name_prefix}-cluster"
 
@@ -736,7 +736,7 @@ resource "aws_ecs_task_definition" "app" {
 
   # ✅ Fargate-safe ephemeral volume
   # This allows us to keep readonlyRootFilesystem=true while still
-  # providing a writable /tmp and /var/tmp.
+  # providing a writable /tmp, /var/tmp, /usr/tmp (required by gunicorn/tempfile).
   volume {
     name = "tmp"
   }
@@ -750,7 +750,7 @@ resource "aws_ecs_task_definition" "app" {
       # ✅ Keep hardening for Checkov
       readonlyRootFilesystem = true
 
-      # ✅ Writable temp paths (common requirement for Python/gunicorn libs)
+      # ✅ Writable temp paths (common requirement for Python/gunicorn)
       mountPoints = [
         {
           sourceVolume  = "tmp"
@@ -760,6 +760,11 @@ resource "aws_ecs_task_definition" "app" {
         {
           sourceVolume  = "tmp"
           containerPath = "/var/tmp"
+          readOnly      = false
+        },
+        {
+          sourceVolume  = "tmp"
+          containerPath = "/usr/tmp"
           readOnly      = false
         }
       ]
@@ -780,11 +785,14 @@ resource "aws_ecs_task_definition" "app" {
         }
       }
 
-      # Keep existing env vars, and force TMPDIR to the writable volume
+      # Keep existing env vars, and force temp/caches into the writable volume
       environment = concat(
         var.container_environment,
         [
-          { name = "TMPDIR", value = "/tmp" }
+          { name = "TMPDIR", value = "/tmp" },
+          { name = "GUNICORN_CMD_ARGS", value = "--worker-tmp-dir /tmp" },
+          { name = "PYTHONUNBUFFERED", value = "1" },
+          { name = "PYTHONPYCACHEPREFIX", value = "/tmp/pycache" }
         ]
       )
     }
