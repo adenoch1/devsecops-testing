@@ -4,14 +4,16 @@
 # - CKV2_AWS_61: add lifecycle configuration to waf_logs_access bucket
 # - CKV_AWS_145: encrypt waf_logs_access bucket with KMS by default
 #
-# Additional production fix (503/EssentialContainerExited):
-# - Keep readonlyRootFilesystem=true for security posture
-# - Add ephemeral writable volume mounted to /tmp and /var/tmp (Fargate-safe)
+# Production fix for 503 / task crash loops:
+# - Keep readonlyRootFilesystem=true (security)
+# - Add ephemeral volume mounted to /tmp and /var/tmp (writable temp)
+# - Add TMPDIR=/tmp to reduce runtime surprises
 ############################################################
 
 data "aws_region" "current" {}
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
+
 
 locals {
   app_port        = var.app_port
@@ -94,7 +96,7 @@ resource "aws_security_group" "ecs_tasks" {
   #trivy:ignore:AWS-0104  # Required HTTPS egress for ECS tasks to pull from ECR and write to CloudWatch Logs via NAT (ephemeral project)
   #checkov:skip=CKV_AWS_382:Required HTTPS egress for ECS tasks to pull images and write logs
   egress {
-    description      = "HTTPS to VPC"
+    description      = "HTTPS to Internet (AWS APIs via NAT)"
     from_port        = 443
     to_port          = 443
     protocol         = "tcp"
@@ -732,8 +734,9 @@ resource "aws_ecs_task_definition" "app" {
   execution_role_arn       = var.ecs_task_execution_role_arn
   task_role_arn            = var.ecs_task_role_arn
 
-  # ✅ Fargate-safe ephemeral volume to keep readonlyRootFilesystem=true
-  # while allowing app/runtime to write to /tmp and /var/tmp.
+  # ✅ Fargate-safe ephemeral volume
+  # This allows us to keep readonlyRootFilesystem=true while still
+  # providing a writable /tmp and /var/tmp.
   volume {
     name = "tmp"
   }
@@ -744,10 +747,10 @@ resource "aws_ecs_task_definition" "app" {
       image     = local.container_image
       essential = true
 
-      # Keep security hardening for Checkov
+      # ✅ Keep hardening for Checkov
       readonlyRootFilesystem = true
 
-      # ✅ Writable tmp locations using ephemeral volume
+      # ✅ Writable temp paths (common requirement for Python/gunicorn libs)
       mountPoints = [
         {
           sourceVolume  = "tmp"
@@ -777,7 +780,7 @@ resource "aws_ecs_task_definition" "app" {
         }
       }
 
-      # Keep existing env, but ensure TMPDIR is explicit
+      # Keep existing env vars, and force TMPDIR to the writable volume
       environment = concat(
         var.container_environment,
         [
@@ -791,11 +794,13 @@ resource "aws_ecs_task_definition" "app" {
 }
 
 resource "aws_ecs_service" "app" {
-  name                               = "${var.name_prefix}-svc"
-  cluster                            = aws_ecs_cluster.this.id
-  task_definition                    = aws_ecs_task_definition.app.arn
-  desired_count                      = var.desired_count
-  launch_type                        = "FARGATE"
+  name            = "${var.name_prefix}-svc"
+  cluster         = aws_ecs_cluster.this.id
+  task_definition = aws_ecs_task_definition.app.arn
+  desired_count   = var.desired_count
+  launch_type     = "FARGATE"
+
+  # ✅ Production-grade rolling update even when desired_count=1
   deployment_minimum_healthy_percent = 100
   deployment_maximum_percent         = 200
   health_check_grace_period_seconds  = 60

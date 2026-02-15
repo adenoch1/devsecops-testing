@@ -142,3 +142,5 @@ jobs:
           no-cache: true
           tags: |
             ${{ env.IMAGE_URI }}:${{ steps.meta.outputs.deploy_tag }}
+            ${{ env.IMAGE_URI }}:bootstrap
+            ${{ env.IMAGE_URI }}:latest
