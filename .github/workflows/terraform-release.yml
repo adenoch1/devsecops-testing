@@ -73,6 +73,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Terraform init
         run: terraform init -input=false
@@ -147,6 +148,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Terraform init
         run: terraform init -input=false
@@ -166,9 +168,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          CLUSTER="$(terraform output -raw ecs_cluster_name 2>/dev/null || terraform output -raw cluster_name 2>/dev/null || true)"
-          SERVICE="$(terraform output -raw ecs_service_name 2>/dev/null || terraform output -raw service_name 2>/dev/null || true)"
-          TG_ARN="$(terraform output -raw target_group_arn 2>/dev/null || true)"
+          CLUSTER="$(terraform output -raw ecs_cluster_name 2>/dev/null || echo "")"
+          if [ -z "${CLUSTER}" ]; then
+            CLUSTER="$(terraform output -raw cluster_name 2>/dev/null || echo "")"
+          fi
+
+          SERVICE="$(terraform output -raw ecs_service_name 2>/dev/null || echo "")"
+          if [ -z "${SERVICE}" ]; then
+            SERVICE="$(terraform output -raw service_name 2>/dev/null || echo "")"
+          fi
+
+          TG_ARN="$(terraform output -raw target_group_arn 2>/dev/null || echo "")
 
           if [ -z "${CLUSTER}" ] || [ -z "${SERVICE}" ]; then
             echo "::error::Missing ECS outputs (ecs_cluster_name / ecs_service_name). Add outputs in Terraform."
@@ -205,6 +215,14 @@ jobs:
           if [ -z "${TG_ARN}" ]; then
             echo "::warning::target_group_arn output not found; skipping TG health validation"
             exit 0
+          fi
+
+          # Guardrail: prevent AWS CLI calls if terraform output got polluted (e.g., wrapper "::error::...")
+          if ! echo "${TG_ARN}" | grep -q '^arn:aws:elasticloadbalancing:'; then
+            echo "::error::Invalid target_group_arn output: ${TG_ARN}"
+            echo "Terraform outputs (for debugging):"
+            terraform output -no-color || true
+            exit 1
           fi
 
           echo "Checking Target Group health for: ${TG_ARN}"
@@ -256,6 +274,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Terraform init
         run: terraform init -input=false
@@ -337,6 +356,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Terraform init
         run: terraform init -input=false
