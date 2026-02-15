@@ -126,6 +126,53 @@ jobs:
             exit 1
           fi
 
+      - name: Guardrail — immutable tags (skip bootstrap/latest if they already exist)
+        id: tags
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DEPLOY_TAG="${{ steps.meta.outputs.deploy_tag }}"
+          REPO="${REPO_NAME}"
+
+          # 1) If deploy tag already exists, fail fast (immutable repos cannot overwrite)
+          if aws ecr describe-images --repository-name "${REPO}" --image-ids imageTag="${DEPLOY_TAG}" >/dev/null 2>&1; then
+            echo "::error::ECR tag '${DEPLOY_TAG}' already exists in '${REPO}' and tags are immutable. Choose a new deploy tag."
+            exit 1
+          fi
+
+          # 2) bootstrap tag: add only if not present
+          BOOTSTRAP_LINE=""
+          if aws ecr describe-images --repository-name "${REPO}" --image-ids imageTag="bootstrap" >/dev/null 2>&1; then
+            echo "bootstrap tag already exists (immutable) — will NOT push bootstrap"
+          else
+            BOOTSTRAP_LINE="${IMAGE_URI}:bootstrap"
+            echo "bootstrap tag not found — will push bootstrap"
+          fi
+
+          # 3) latest tag: add only if not present (immutable repos can't overwrite)
+          LATEST_LINE=""
+          if aws ecr describe-images --repository-name "${REPO}" --image-ids imageTag="latest" >/dev/null 2>&1; then
+            echo "latest tag already exists (immutable) — will NOT push latest"
+          else
+            LATEST_LINE="${IMAGE_URI}:latest"
+            echo "latest tag not found — will push latest"
+          fi
+
+          # Build tags list (always include deploy tag)
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE_URI}:${DEPLOY_TAG}"
+            if [ -n "${BOOTSTRAP_LINE}" ]; then echo "${BOOTSTRAP_LINE}"; fi
+            if [ -n "${LATEST_LINE}" ]; then echo "${LATEST_LINE}"; fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Final tags to push:"
+          echo "${IMAGE_URI}:${DEPLOY_TAG}"
+          if [ -n "${BOOTSTRAP_LINE}" ]; then echo "${BOOTSTRAP_LINE}"; fi
+          if [ -n "${LATEST_LINE}" ]; then echo "${LATEST_LINE}"; fi
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -140,7 +187,4 @@ jobs:
           push: true
           pull: true
           no-cache: true
-          tags: |
-            ${{ env.IMAGE_URI }}:${{ steps.meta.outputs.deploy_tag }}
-            ${{ env.IMAGE_URI }}:bootstrap
-            ${{ env.IMAGE_URI }}:latest
+          tags: ${{ steps.tags.outputs.tags }}
