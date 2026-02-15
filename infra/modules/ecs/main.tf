@@ -109,7 +109,7 @@ resource "aws_security_group" "ecs_tasks" {
 
 # ----------------------------------------------------------
 # Application Load Balancer (ALB) + Target Group + Listener (HTTPS)
-# ------------------------------------------------------------
+# ----------------------------------------------------------
 
 # Public ALB is intentional in this project (internet-facing entrypoint)
 #tfsec:ignore:aws-0053
