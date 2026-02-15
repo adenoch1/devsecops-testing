@@ -222,7 +222,7 @@ jobs:
           exit 1
 
 
-  #######################################################
+  ######################################################
   # Smoke Test
   # - Always tests ALB DNS directly (reliable)
   # - Optionally tests FQDN (if you configured it)
