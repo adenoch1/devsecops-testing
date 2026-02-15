@@ -343,7 +343,7 @@ jobs:
 
   #####################################################
   # Destroy (gated) — appears after smoke, waits for approval
-  ########################################################
+  #######################################################
   destroy:
     name: Destroy (approval gated)
     needs: dns_smoke
