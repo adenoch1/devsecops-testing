@@ -3,6 +3,10 @@
 # Fixes:
 # - CKV2_AWS_61: add lifecycle configuration to waf_logs_access bucket
 # - CKV_AWS_145: encrypt waf_logs_access bucket with KMS by default
+#
+# Additional production fix (503/EssentialContainerExited):
+# - Keep readonlyRootFilesystem=true for security posture
+# - Add ephemeral writable volume mounted to /tmp and /var/tmp (Fargate-safe)
 ############################################################
 
 data "aws_region" "current" {}
@@ -86,6 +90,7 @@ resource "aws_security_group" "ecs_tasks" {
     protocol    = "tcp"
     cidr_blocks = [var.vpc_cidr]
   }
+
   #trivy:ignore:AWS-0104  # Required HTTPS egress for ECS tasks to pull from ECR and write to CloudWatch Logs via NAT (ephemeral project)
   #checkov:skip=CKV_AWS_382:Required HTTPS egress for ECS tasks to pull images and write logs
   egress {
@@ -617,7 +622,6 @@ resource "aws_kms_key" "waf_logs" {
   tags = merge(var.tags, { Name = "${var.name_prefix}-waf-logs-kms" })
 }
 
-
 resource "aws_kms_alias" "waf_logs" {
   name          = "alias/${var.name_prefix}-waf-logs"
   target_key_id = aws_kms_key.waf_logs.key_id
@@ -705,7 +709,6 @@ resource "aws_wafv2_web_acl_logging_configuration" "alb" {
   ]
 }
 
-
 # --------------------------------------------------------
 # ECS Cluster + Task + Service (Fargate)
 # ----------------------------------------------------------
@@ -729,13 +732,34 @@ resource "aws_ecs_task_definition" "app" {
   execution_role_arn       = var.ecs_task_execution_role_arn
   task_role_arn            = var.ecs_task_role_arn
 
+  # ✅ Fargate-safe ephemeral volume to keep readonlyRootFilesystem=true
+  # while allowing app/runtime to write to /tmp and /var/tmp.
+  volume {
+    name = "tmp"
+  }
+
   container_definitions = jsonencode([
     {
       name      = "app"
       image     = local.container_image
       essential = true
 
+      # Keep security hardening for Checkov
       readonlyRootFilesystem = true
+
+      # ✅ Writable tmp locations using ephemeral volume
+      mountPoints = [
+        {
+          sourceVolume  = "tmp"
+          containerPath = "/tmp"
+          readOnly      = false
+        },
+        {
+          sourceVolume  = "tmp"
+          containerPath = "/var/tmp"
+          readOnly      = false
+        }
+      ]
 
       portMappings = [
         {
@@ -753,7 +777,13 @@ resource "aws_ecs_task_definition" "app" {
         }
       }
 
-      environment = var.container_environment
+      # Keep existing env, but ensure TMPDIR is explicit
+      environment = concat(
+        var.container_environment,
+        [
+          { name = "TMPDIR", value = "/tmp" }
+        ]
+      )
     }
   ])
 
