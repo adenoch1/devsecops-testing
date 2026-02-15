@@ -43,6 +43,10 @@ env:
   TF_CLI_ARGS: "-no-color"
   TF_VERSION: "1.6.6"
   WORKDIR: "infra/envs/dev"
+  # ECR tags are immutable in your repo.
+  # Re-runs of the same commit must use a fresh tag.
+  # This stays traceable to the commit but guarantees uniqueness.
+  DEPLOY_TAG: "${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
 
 jobs:
   ######################################################
@@ -73,6 +77,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Terraform init
         run: terraform init -input=false
@@ -113,13 +118,15 @@ jobs:
     uses: ./.github/workflows/03-release.yml
     secrets: inherit
     with:
-      image_tag: ${{ github.sha }}
+      # IMPORTANT: ECR tags are immutable in your repo.
+      # Never reuse github.sha alone, because reruns will fail.
+      image_tag: ${{ env.DEPLOY_TAG }}
       tfvars_path: infra/envs/dev/terraform.tfvars
       dockerfile_path: docker/Dockerfile
       build_context: .
 
   ######################################################
-  # Deploy — apply with the immutable SHA tag + desired_count=1
+  # Deploy — apply with the unique tag + desired_count=1
   ######################################################
   deploy:
     name: Deploy (dev)
@@ -147,6 +154,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Terraform init
         run: terraform init -input=false
@@ -155,7 +163,7 @@ jobs:
         run: |
           terraform plan \
             -out=tfplan.deploy \
-            -var="container_image_tag=${{ needs.build_push.outputs.deploy_tag }}" \
+            -var="container_image_tag=${{ env.DEPLOY_TAG }}" \
             -var="desired_count=1"
 
       - name: Terraform apply (deploy)
@@ -166,18 +174,28 @@ jobs:
         run: |
           set -euo pipefail
 
-          CLUSTER="$(terraform output -raw ecs_cluster_name 2>/dev/null || terraform output -raw cluster_name 2>/dev/null || true)"
-          SERVICE="$(terraform output -raw ecs_service_name 2>/dev/null || terraform output -raw service_name 2>/dev/null || true)"
-          TG_ARN="$(terraform output -raw target_group_arn 2>/dev/null || true)"
+          CLUSTER="$(terraform output -raw ecs_cluster_name 2>/dev/null || echo "")"
+          if [ -z "${CLUSTER}" ]; then
+            CLUSTER="$(terraform output -raw cluster_name 2>/dev/null || echo "")"
+          fi
+
+          SERVICE="$(terraform output -raw ecs_service_name 2>/dev/null || echo "")"
+          if [ -z "${SERVICE}" ]; then
+            SERVICE="$(terraform output -raw service_name 2>/dev/null || echo "")"
+          fi
+
+          TG_ARN="$(terraform output -raw target_group_arn 2>/dev/null || echo "")"
 
           if [ -z "${CLUSTER}" ] || [ -z "${SERVICE}" ]; then
             echo "::error::Missing ECS outputs (ecs_cluster_name / ecs_service_name). Add outputs in Terraform."
+            terraform output -no-color || true
             exit 1
           fi
 
           echo "Waiting for ECS service to become stable: ${CLUSTER}/${SERVICE}"
           if ! aws ecs wait services-stable --cluster "${CLUSTER}" --services "${SERVICE}"; then
             echo "Error: ECS service did not become stable. Dumping diagnostics..."
+
             echo "---- ECS events (latest 20) ----"
             aws ecs describe-services --cluster "${CLUSTER}" --services "${SERVICE}" \
               --query "services[0].events[0:20].[message]" --output table || true
@@ -195,16 +213,25 @@ jobs:
               done
             fi
 
-            if [ -n "${TG_ARN}" ]; then
+            if [ -n "${TG_ARN}" ] && echo "${TG_ARN}" | grep -q '^arn:aws:elasticloadbalancing:'; then
               echo "---- Target health (full reasons) ----"
               aws elbv2 describe-target-health --target-group-arn "${TG_ARN}" --output table || true
             fi
+
             exit 1
           fi
 
           if [ -z "${TG_ARN}" ]; then
             echo "::warning::target_group_arn output not found; skipping TG health validation"
             exit 0
+          fi
+
+          # Guardrail: prevent AWS CLI calls if terraform output got polluted.
+          if ! echo "${TG_ARN}" | grep -q '^arn:aws:elasticloadbalancing:'; then
+            echo "::error::Invalid target_group_arn output: ${TG_ARN}"
+            echo "Terraform outputs (for debugging):"
+            terraform output -no-color || true
+            exit 1
           fi
 
           echo "Checking Target Group health for: ${TG_ARN}"
@@ -256,6 +283,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Terraform init
         run: terraform init -input=false
@@ -337,6 +365,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Terraform init
         run: terraform init -input=false
@@ -346,7 +375,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          PREFIX="${{ env.WORKDIR }}"
           NAME_PREFIX="devsecops-flask-dev"
 
           echo "Searching for ALB(s) to disable deletion protection..."
@@ -372,13 +400,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Safely read vpc_id from terraform outputs without leaking warnings/ANSI into variables.
           VPC_ID=""
-
-          # Get outputs as JSON; if state/outputs missing, this yields '{}' and we skip.
           TF_OUT="$(terraform output -json 2>/dev/null || echo '{}')"
-
-          # Extract vpc_id.value if present
           VPC_ID="$(echo "$TF_OUT" | jq -r '.vpc_id.value // empty' 2>/dev/null || true)"
 
           if [ -z "${VPC_ID}" ] || [ "${VPC_ID}" = "null" ]; then
