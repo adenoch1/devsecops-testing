@@ -131,6 +131,7 @@ resource "aws_lb_target_group" "app" {
   protocol    = "HTTP"
   target_type = "ip"
   vpc_id      = var.vpc_id
+  deregistration_delay = 30
 
   health_check {
     enabled             = true
@@ -765,6 +766,9 @@ resource "aws_ecs_service" "app" {
   task_definition = aws_ecs_task_definition.app.arn
   desired_count   = var.desired_count
   launch_type     = "FARGATE"
+  deployment_minimum_healthy_percent = 100
+  deployment_maximum_percent         = 200
+  health_check_grace_period_seconds = 60
 
   network_configuration {
     subnets          = var.private_subnet_ids

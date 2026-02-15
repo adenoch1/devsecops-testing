@@ -160,63 +160,118 @@ jobs:
       - name: Terraform apply (deploy)
         run: terraform apply -auto-approve tfplan.deploy
 
-      - name: Wait for ECS/ALB targets to become healthy (best-effort)
+      - name: Wait for ECS/ALB targets to become healthy (fail with evidence)
         shell: bash
         run: |
           set -euo pipefail
 
-          if terraform output -raw ecs_cluster_name >/dev/null 2>&1 && terraform output -raw ecs_service_name >/dev/null 2>&1; then
-            CLUSTER="$(terraform output -raw ecs_cluster_name)"
-            SERVICE="$(terraform output -raw ecs_service_name)"
-            echo "Waiting for ECS service to become stable: ${CLUSTER}/${SERVICE}"
-            aws ecs wait services-stable --cluster "${CLUSTER}" --services "${SERVICE}" || true
-          else
-            echo "ECS outputs not found (ecs_cluster_name/ecs_service_name). Skipping ECS wait."
+          CLUSTER="$(terraform output -raw ecs_cluster_name)"
+          SERVICE="$(terraform output -raw ecs_service_name)"
+          TG_ARN="$(terraform output -raw alb_target_group_arn)"
+
+          echo "Waiting for ECS service to become stable: ${CLUSTER}/${SERVICE}"
+          if ! aws ecs wait services-stable --cluster "${CLUSTER}" --services "${SERVICE}"; then
+            echo "::error::ECS service did not become stable. Dumping diagnostics..."
+            echo "---- ECS events ----"
+            aws ecs describe-services \
+              --cluster "${CLUSTER}" \
+              --services "${SERVICE}" \
+              --query "services[0].events[0:20].message" \
+              --output table || true
+
+            echo "---- STOPPED tasks (latest 5) ----"
+            STOPPED="$(aws ecs list-tasks --cluster "${CLUSTER}" --service-name "${SERVICE}" --desired-status STOPPED --max-results 5 --query 'taskArns' --output text || true)"
+            echo "${STOPPED:-<none>}"
+
+            if [ -n "${STOPPED}" ] && [ "${STOPPED}" != "None" ]; then
+              for t in ${STOPPED}; do
+                echo "---- Task: $t ----"
+                aws ecs describe-tasks \
+                  --cluster "${CLUSTER}" \
+                  --tasks "$t" \
+                  --query "tasks[0].{last:lastStatus,stopCode:stopCode,stoppedReason:stoppedReason,exit:containers[0].exitCode,reason:containers[0].reason}" \
+                  --output json || true
+              done
+            fi
+
+            echo "---- Target health ----"
+            aws elbv2 describe-target-health \
+              --target-group-arn "${TG_ARN}" \
+              --query "TargetHealthDescriptions[].{id:Target.Id,state:TargetHealth.State,reason:TargetHealth.Reason,desc:TargetHealth.Description}" \
+              --output table || true
+
+            exit 1
           fi
 
-          if terraform output -raw alb_target_group_arn >/dev/null 2>&1; then
-            TG_ARN="$(terraform output -raw alb_target_group_arn)"
-            echo "Checking target health for: ${TG_ARN}"
+          echo "Checking target health for: ${TG_ARN}"
+          for i in {1..30}; do
+            STATES="$(aws elbv2 describe-target-health --target-group-arn "${TG_ARN}" --query "TargetHealthDescriptions[].TargetHealth.State" --output text || true)"
+            echo "Attempt ${i} — target states: ${STATES:-<none>}"
+            if echo "${STATES}" | grep -q "healthy"; then
+              echo "Target group has healthy targets ✅"
+              exit 0
+            fi
+            sleep 10
+          done
 
-            for i in {1..30}; do
-              STATES="$(aws elbv2 describe-target-health --target-group-arn "${TG_ARN}" --query "TargetHealthDescriptions[].TargetHealth.State" --output text || true)"
-              echo "Attempt ${i} — target states: ${STATES:-<none>}"
+          echo "::error::No healthy targets observed. Dumping target health details..."
+          aws elbv2 describe-target-health \
+            --target-group-arn "${TG_ARN}" \
+            --query "TargetHealthDescriptions[].{id:Target.Id,state:TargetHealth.State,reason:TargetHealth.Reason,desc:TargetHealth.Description}" \
+            --output table || true
+          exit 1
 
-              if echo "${STATES}" | grep -q "healthy"; then
-                echo "Target group has healthy targets ✅"
-                exit 0
-              fi
-              sleep 10
-            done
-
-            echo "::warning::No healthy targets observed yet. If you still see 503, check:"
-            echo "::warning::  - ECS task is running and passing container health check"
-            echo "::warning::  - Target group port matches container port"
-            echo "::warning::  - Health check path/port/protocol match the app"
-            echo "::warning::  - Security groups allow ALB -> tasks"
-            exit 0
-          else
-            echo "Target group output not found (alb_target_group_arn). Skipping target health check."
-          fi
-
-      - name: Show outputs
-        run: terraform output || true
 
   #######################################################
-  # DNS Smoke Test (non-blocking if FQDN isn't ready)
+  # Smoke Test
+  # - Always tests ALB DNS directly (reliable)
+  # - Optionally tests FQDN (if you configured it)
   ######################################################
-  dns_smoke:
-    name: DNS Smoke Test (non-blocking)
+  smoke_test:
+    name: Smoke Test (ALB + optional FQDN)
     needs: deploy
     if: ${{ github.event_name == 'push' || inputs.action == 'deploy' }}
     runs-on: ubuntu-latest
-    environment: dns
+    environment: dev
+
+    defaults:
+      run:
+        working-directory: ${{ env.WORKDIR }}
 
     steps:
-      - name: Resolve FQDN and path
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_APPLY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Resolve smoke URL(s)
         shell: bash
         run: |
           set -euo pipefail
+
+          PATH_ONLY="${{ inputs.smoke_path }}"
+          if [[ "$PATH_ONLY" != /* ]]; then PATH_ONLY="/$PATH_ONLY"; fi
+
+          ALB_DNS="$(terraform output -raw alb_dns_name 2>/dev/null || true)"
+          if [ -z "$ALB_DNS" ]; then
+            echo "::error::alb_dns_name output missing — cannot smoke test."
+            exit 1
+          fi
+
+          echo "ALB_URL=https://${ALB_DNS}${PATH_ONLY}" >> $GITHUB_ENV
 
           FQDN_INPUT="${{ inputs.fqdn }}"
           SECRET_FQDN="${{ secrets.FQDN }}"
@@ -229,60 +284,46 @@ jobs:
             echo "FQDN=" >> $GITHUB_ENV
           fi
 
-          echo "SMOKE_PATH=${{ inputs.smoke_path }}" >> $GITHUB_ENV
-
-      - name: Skip if FQDN not configured (warning only)
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -z "${FQDN}" ]; then
-            echo "::warning::FQDN is not set. Skipping DNS smoke test."
-            echo "::warning::Set secret FQDN (example: app.clevernews.org) after you create your GoDaddy CNAME."
-            exit 0
+          if [ -n "${FQDN_INPUT}${SECRET_FQDN}" ]; then
+            echo "FQDN_URL=https://${FQDN:-}${PATH_ONLY}" >> $GITHUB_ENV
           fi
-          echo "FQDN configured: ${FQDN}"
 
-      - name: DNS resolution check (short)
+          echo "ALB_URL: ${ALB_DNS}${PATH_ONLY}"
+          if [ -n "${FQDN:-}" ]; then echo "FQDN_URL: ${FQDN}${PATH_ONLY}"; fi
+
+      - name: Smoke test ALB (must pass)
         shell: bash
         run: |
           set -euo pipefail
-          for i in {1..6}; do
-            echo "Attempt $i..."
-            A="$(dig +short A "${FQDN}" || true)"
-            CNAME="$(dig +short CNAME "${FQDN}" || true)"
-            echo "A: ${A:-<none>}"
-            echo "CNAME: ${CNAME:-<none>}"
-            if [ -n "$A" ] || [ -n "$CNAME" ]; then
-              echo "DNS resolves ✅"
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "::warning::DNS did not resolve yet (propagation may still be happening)."
-          exit 0
-
-      - name: HTTPS smoke test (warning-only)
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          PATH_ONLY="${SMOKE_PATH}"
-          if [[ "$PATH_ONLY" != /* ]]; then PATH_ONLY="/$PATH_ONLY"; fi
-          URL="https://${FQDN}${PATH_ONLY}"
-          echo "Testing URL: $URL"
-
-          for i in {1..10}; do
-            echo "Attempt $i..."
-            code="$(curl -k -s -o /dev/null -w "%{http_code}" "$URL" || true)"
-            echo "HTTP status: $code"
+          echo "Testing: ${ALB_URL}"
+          for i in {1..18}; do
+            code="$(curl -k -s -o /dev/null -w "%{http_code}" "${ALB_URL}" || true)"
+            echo "Attempt $i — HTTP ${code}"
             if [[ "$code" =~ ^2[0-9][0-9]$ ]] || [[ "$code" =~ ^3[0-9][0-9]$ ]]; then
-              echo "Smoke test passed ✅"
+              echo "ALB smoke passed ✅"
               exit 0
             fi
             sleep 10
           done
+          echo "::error::ALB smoke failed. Most common causes: desired_count=0, tasks failing to start, target group health check failing."
+          exit 1
 
-          echo "::warning::HTTPS smoke test did not pass yet. Check DNS/CNAME/TLS/ALB target health."
+      - name: Smoke test FQDN (warning-only)
+        if: ${{ env.FQDN != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Testing: ${FQDN_URL}"
+          for i in {1..12}; do
+            code="$(curl -k -s -o /dev/null -w "%{http_code}" "${FQDN_URL}" || true)"
+            echo "Attempt $i — HTTP ${code}"
+            if [[ "$code" =~ ^2[0-9][0-9]$ ]] || [[ "$code" =~ ^3[0-9][0-9]$ ]]; then
+              echo "FQDN smoke passed ✅"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::warning::FQDN smoke did not pass yet (DNS/CNAME/TLS propagation)."
           exit 0
 
   #####################################################
