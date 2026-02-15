@@ -20,7 +20,7 @@ on:
         type: choice
         options: [deploy, destroy]
       fqdn:
-        description: "Custom domain to test (example: app.clevernews.org). Optional."
+        description: "Custom domain to test (example: app.example.com). Optional."
         required: false
         default: ""
       smoke_path:
@@ -48,7 +48,7 @@ jobs:
   # Gate 1 (DEV): Infra Bootstrap (safe even before image)
   ######################################################
   infra_bootstrap:
-    name: Gate 1 — Infra Bootstrap (dev)
+    name: Bootstrap — Infra (dev)
     if: ${{ github.event_name == 'push' || inputs.action == 'deploy' }}
     runs-on: ubuntu-latest
     environment: dev
@@ -86,20 +86,20 @@ jobs:
       - name: Terraform apply (bootstrap)
         run: terraform apply -auto-approve tfplan.bootstrap
 
-      - name: Helpful outputs (copy for GoDaddy / debugging)
+      - name: Helpful outputs (ALB DNS)
         shell: bash
         run: |
           set -euo pipefail
           echo "==== Terraform outputs ===="
           terraform output || true
           echo ""
-          echo "If you need the ALB DNS name for GoDaddy CNAME:"
+          echo "If you need the ALB DNS name for your DNS CNAME:"
           if terraform output -raw alb_dns_name >/dev/null 2>&1; then
             echo "ALB DNS: $(terraform output -raw alb_dns_name)"
           elif terraform output -raw alb_dns >/dev/null 2>&1; then
             echo "ALB DNS: $(terraform output -raw alb_dns)"
           else
-            echo "ALB DNS output not found. Add an output like: output \"alb_dns_name\" { value = aws_lb.<name>.dns_name }"
+            echo "::warning::ALB DNS output not found. Add an output like: output \"alb_dns_name\" { value = aws_lb.<name>.dns_name }"
           fi
 
   #######################################################
@@ -160,41 +160,71 @@ jobs:
       - name: Terraform apply (deploy)
         run: terraform apply -auto-approve tfplan.deploy
 
-      - name: Wait for ECS/ALB targets to become healthy (fail with evidence)
+      - name: Read Terraform outputs for ECS/ALB (required)
         shell: bash
         run: |
           set -euo pipefail
 
-          CLUSTER="$(terraform output -raw ecs_cluster_name)"
-          SERVICE="$(terraform output -raw ecs_service_name)"
-          TG_ARN="$(terraform output -raw alb_target_group_arn)"
+          # These outputs MUST exist for production-grade gating.
+          # If missing, fail fast with a clear error.
+          if ! terraform output -raw ecs_cluster_name >/dev/null 2>&1; then
+            echo "::error::Missing Terraform output: ecs_cluster_name"
+            echo "Add outputs: ecs_cluster_name, ecs_service_name, alb_target_group_arn"
+            exit 1
+          fi
+          if ! terraform output -raw ecs_service_name >/dev/null 2>&1; then
+            echo "::error::Missing Terraform output: ecs_service_name"
+            echo "Add outputs: ecs_cluster_name, ecs_service_name, alb_target_group_arn"
+            exit 1
+          fi
+          if ! terraform output -raw alb_target_group_arn >/dev/null 2>&1; then
+            echo "::error::Missing Terraform output: alb_target_group_arn"
+            echo "Add outputs: ecs_cluster_name, ecs_service_name, alb_target_group_arn"
+            exit 1
+          fi
 
-          echo "Waiting for ECS service to become stable: ${CLUSTER}/${SERVICE}"
-          if ! aws ecs wait services-stable --cluster "${CLUSTER}" --services "${SERVICE}"; then
+          echo "ECS_CLUSTER=$(terraform output -raw ecs_cluster_name)" >> $GITHUB_ENV
+          echo "ECS_SERVICE=$(terraform output -raw ecs_service_name)" >> $GITHUB_ENV
+          echo "TG_ARN=$(terraform output -raw alb_target_group_arn)" >> $GITHUB_ENV
+
+      - name: Wait for ECS stable + Target Group healthy (FAILS if unhealthy)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Waiting for ECS service to become stable: ${ECS_CLUSTER}/${ECS_SERVICE}"
+          if ! aws ecs wait services-stable --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}"; then
             echo "::error::ECS service did not become stable. Dumping diagnostics..."
-            echo "---- ECS events ----"
+
+            echo "---- ECS events (latest 20) ----"
             aws ecs describe-services \
-              --cluster "${CLUSTER}" \
-              --services "${SERVICE}" \
+              --cluster "${ECS_CLUSTER}" \
+              --services "${ECS_SERVICE}" \
               --query "services[0].events[0:20].message" \
               --output table || true
 
             echo "---- STOPPED tasks (latest 5) ----"
-            STOPPED="$(aws ecs list-tasks --cluster "${CLUSTER}" --service-name "${SERVICE}" --desired-status STOPPED --max-results 5 --query 'taskArns' --output text || true)"
+            STOPPED="$(aws ecs list-tasks \
+              --cluster "${ECS_CLUSTER}" \
+              --service-name "${ECS_SERVICE}" \
+              --desired-status STOPPED \
+              --max-results 5 \
+              --query 'taskArns' \
+              --output text || true)"
             echo "${STOPPED:-<none>}"
 
             if [ -n "${STOPPED}" ] && [ "${STOPPED}" != "None" ]; then
               for t in ${STOPPED}; do
-                echo "---- Task: $t ----"
+                echo "---- Task stopped details: $t ----"
                 aws ecs describe-tasks \
-                  --cluster "${CLUSTER}" \
+                  --cluster "${ECS_CLUSTER}" \
                   --tasks "$t" \
                   --query "tasks[0].{last:lastStatus,stopCode:stopCode,stoppedReason:stoppedReason,exit:containers[0].exitCode,reason:containers[0].reason}" \
                   --output json || true
               done
             fi
 
-            echo "---- Target health ----"
+            echo "---- Target health (full reasons) ----"
             aws elbv2 describe-target-health \
               --target-group-arn "${TG_ARN}" \
               --query "TargetHealthDescriptions[].{id:Target.Id,state:TargetHealth.State,reason:TargetHealth.Reason,desc:TargetHealth.Description}" \
@@ -205,132 +235,117 @@ jobs:
 
           echo "Checking target health for: ${TG_ARN}"
           for i in {1..30}; do
-            STATES="$(aws elbv2 describe-target-health --target-group-arn "${TG_ARN}" --query "TargetHealthDescriptions[].TargetHealth.State" --output text || true)"
+            STATES="$(aws elbv2 describe-target-health \
+              --target-group-arn "${TG_ARN}" \
+              --query "TargetHealthDescriptions[].TargetHealth.State" \
+              --output text)"
+
             echo "Attempt ${i} — target states: ${STATES:-<none>}"
+
             if echo "${STATES}" | grep -q "healthy"; then
-              echo "Target group has healthy targets ✅"
+              echo "✅ Target group has healthy targets"
               exit 0
             fi
+
             sleep 10
           done
 
-          echo "::error::No healthy targets observed. Dumping target health details..."
+          echo "::error::❌ No healthy targets after waiting. Failing deployment."
           aws elbv2 describe-target-health \
             --target-group-arn "${TG_ARN}" \
             --query "TargetHealthDescriptions[].{id:Target.Id,state:TargetHealth.State,reason:TargetHealth.Reason,desc:TargetHealth.Description}" \
             --output table || true
+
           exit 1
 
-
+  #######################################################
+  # DNS Smoke Test (BLOCKING if FQDN is configured)
   ######################################################
-  # Smoke Test
-  # - Always tests ALB DNS directly (reliable)
-  # - Optionally tests FQDN (if you configured it)
-  ######################################################
-  smoke_test:
-    name: Smoke Test (ALB + optional FQDN)
+  dns_smoke:
+    name: DNS Smoke Test
     needs: deploy
     if: ${{ github.event_name == 'push' || inputs.action == 'deploy' }}
     runs-on: ubuntu-latest
-    environment: dev
-
-    defaults:
-      run:
-        working-directory: ${{ env.WORKDIR }}
+    environment: dns
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN_APPLY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-          audience: sts.amazonaws.com
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-
-      - name: Terraform init
-        run: terraform init -input=false
-
-      - name: Resolve smoke URL(s)
+      - name: Resolve FQDN and path
         shell: bash
         run: |
           set -euo pipefail
-
-          PATH_ONLY="${{ inputs.smoke_path }}"
-          if [[ "$PATH_ONLY" != /* ]]; then PATH_ONLY="/$PATH_ONLY"; fi
-
-          ALB_DNS="$(terraform output -raw alb_dns_name 2>/dev/null || true)"
-          if [ -z "$ALB_DNS" ]; then
-            echo "::error::alb_dns_name output missing — cannot smoke test."
-            exit 1
-          fi
-
-          echo "ALB_URL=https://${ALB_DNS}${PATH_ONLY}" >> $GITHUB_ENV
 
           FQDN_INPUT="${{ inputs.fqdn }}"
           SECRET_FQDN="${{ secrets.FQDN }}"
 
-          if [ -n "$FQDN_INPUT" ]; then
-            echo "FQDN=$FQDN_INPUT" >> $GITHUB_ENV
-          elif [ -n "$SECRET_FQDN" ]; then
-            echo "FQDN=$SECRET_FQDN" >> $GITHUB_ENV
+          if [ -n "${FQDN_INPUT}" ]; then
+            echo "FQDN=${FQDN_INPUT}" >> $GITHUB_ENV
+          elif [ -n "${SECRET_FQDN}" ]; then
+            echo "FQDN=${SECRET_FQDN}" >> $GITHUB_ENV
           else
             echo "FQDN=" >> $GITHUB_ENV
           fi
 
-          if [ -n "${FQDN_INPUT}${SECRET_FQDN}" ]; then
-            echo "FQDN_URL=https://${FQDN:-}${PATH_ONLY}" >> $GITHUB_ENV
-          fi
+          echo "SMOKE_PATH=${{ inputs.smoke_path }}" >> $GITHUB_ENV
 
-          echo "ALB_URL: ${ALB_DNS}${PATH_ONLY}"
-          if [ -n "${FQDN:-}" ]; then echo "FQDN_URL: ${FQDN}${PATH_ONLY}"; fi
-
-      - name: Smoke test ALB (must pass)
+      - name: Skip if FQDN not configured
         shell: bash
         run: |
           set -euo pipefail
-          echo "Testing: ${ALB_URL}"
-          for i in {1..18}; do
-            code="$(curl -k -s -o /dev/null -w "%{http_code}" "${ALB_URL}" || true)"
-            echo "Attempt $i — HTTP ${code}"
-            if [[ "$code" =~ ^2[0-9][0-9]$ ]] || [[ "$code" =~ ^3[0-9][0-9]$ ]]; then
-              echo "ALB smoke passed ✅"
+          if [ -z "${FQDN}" ]; then
+            echo "::warning::FQDN is not set. Skipping DNS smoke test."
+            echo "::warning::Set secret FQDN after you create your DNS CNAME to the ALB."
+            exit 0
+          fi
+          echo "FQDN configured: ${FQDN}"
+
+      - name: DNS resolution check (FAIL if not resolving)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in {1..12}; do
+            echo "Attempt $i..."
+            A="$(dig +short A "${FQDN}" || true)"
+            CNAME="$(dig +short CNAME "${FQDN}" || true)"
+            echo "A: ${A:-<none>}"
+            echo "CNAME: ${CNAME:-<none>}"
+            if [ -n "$A" ] || [ -n "$CNAME" ]; then
+              echo "✅ DNS resolves"
               exit 0
             fi
             sleep 10
           done
-          echo "::error::ALB smoke failed. Most common causes: desired_count=0, tasks failing to start, target group health check failing."
+          echo "::error::❌ DNS did not resolve for ${FQDN} (propagation/CNAME not ready)."
           exit 1
 
-      - name: Smoke test FQDN (warning-only)
-        if: ${{ env.FQDN != '' }}
+      - name: HTTPS smoke test (FAIL if not 2xx/3xx)
         shell: bash
         run: |
           set -euo pipefail
-          echo "Testing: ${FQDN_URL}"
+
+          PATH_ONLY="${SMOKE_PATH}"
+          if [[ "$PATH_ONLY" != /* ]]; then PATH_ONLY="/$PATH_ONLY"; fi
+          URL="https://${FQDN}${PATH_ONLY}"
+          echo "Testing URL: $URL"
+
           for i in {1..12}; do
-            code="$(curl -k -s -o /dev/null -w "%{http_code}" "${FQDN_URL}" || true)"
-            echo "Attempt $i — HTTP ${code}"
+            echo "Attempt $i..."
+            code="$(curl -k -s -o /dev/null -w "%{http_code}" "$URL" || true)"
+            echo "HTTP status: $code"
             if [[ "$code" =~ ^2[0-9][0-9]$ ]] || [[ "$code" =~ ^3[0-9][0-9]$ ]]; then
-              echo "FQDN smoke passed ✅"
+              echo "✅ DNS smoke test passed"
               exit 0
             fi
             sleep 10
           done
-          echo "::warning::FQDN smoke did not pass yet (DNS/CNAME/TLS propagation)."
-          exit 0
+
+          echo "::error::❌ DNS smoke test failed (not returning 2xx/3xx). Check TLS/DNS/ALB target health."
+          exit 1
 
   #####################################################
-  # Destroy (gated) — appears after deploy/smoke, waits for approval
+  # Destroy (gated) — appears after smoke, waits for approval
   ########################################################
   destroy:
-    name: Destroy (gated)
+    name: Destroy (approval gated)
     needs: dns_smoke
     if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.action == 'destroy') }}
     runs-on: ubuntu-latest
@@ -359,14 +374,12 @@ jobs:
       - name: Terraform init
         run: terraform init -input=false
 
-      - name: Disable ALB deletion protection (controlled teardown) - safe on reruns
+      - name: Disable ALB deletion protection (safe on reruns)
         shell: bash
         run: |
           set -euo pipefail
 
-          PREFIX="${{ env.WORKDIR }}"
           NAME_PREFIX="devsecops-flask-dev"
-
           echo "Searching for ALB(s) to disable deletion protection..."
 
           ALB_ARNS="$(aws elbv2 describe-load-balancers \
@@ -385,19 +398,18 @@ jobs:
               --attributes Key=deletion_protection.enabled,Value=false
           done
 
-      - name: Wait for AWS to release public IP mappings (IGW safety)
+      - name: Wait for AWS to release public IP mappings (best-effort)
         shell: bash
         run: |
           set -euo pipefail
 
-          # Safely read vpc_id. If outputs/state are missing, skip the wait instead of crashing.
           VPC_ID=""
           if terraform output -raw vpc_id >/dev/null 2>&1; then
             VPC_ID="$(terraform output -raw vpc_id 2>/dev/null || true)"
           fi
 
           if [ -z "${VPC_ID}" ] || [ "${VPC_ID}" = "null" ]; then
-            echo "::warning::VPC ID not found in terraform outputs (state missing or no outputs). Skipping wait."
+            echo "::warning::VPC ID not found in terraform outputs. Skipping wait."
             exit 0
           fi
 
@@ -410,7 +422,7 @@ jobs:
               --output text)"
             echo "Attempt $i — public ENIs with public IPs: $COUNT"
             if [ "$COUNT" = "0" ]; then
-              echo "AWS cleanup complete ✅"
+              echo "✅ AWS cleanup complete"
               exit 0
             fi
             sleep 15

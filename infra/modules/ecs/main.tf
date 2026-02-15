@@ -100,7 +100,7 @@ resource "aws_security_group" "ecs_tasks" {
   tags = merge(var.tags, { Name = "${var.name_prefix}-tasks-sg" })
 }
 
-# -----------------------------------------------------------
+# ----------------------------------------------------------
 # Application Load Balancer (ALB) + Target Group + Listener (HTTPS)
 # ----------------------------------------------------------
 
