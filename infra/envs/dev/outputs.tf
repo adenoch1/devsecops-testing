@@ -12,3 +12,19 @@ output "alb_arn" {
   description = "ALB ARN (if ECS module is enabled)"
   value       = try(module.ecs.alb_arn, null)
 }
+
+
+output "alb_target_group_arn" {
+  description = "ALB Target Group ARN"
+  value       = try(module.ecs.alb_target_group_arn, null)
+}
+
+output "ecs_cluster_name" {
+  description = "ECS cluster name"
+  value       = try(module.ecs.ecs_cluster_name, null)
+}
+
+output "ecs_service_name" {
+  description = "ECS service name"
+  value       = try(module.ecs.ecs_service_name, null)
+}
