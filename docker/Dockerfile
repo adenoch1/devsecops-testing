@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # -----------------------------
-# Stage 1: builder
+# Stage 1: builder (install deps)
 # -----------------------------
 FROM python:3.11-slim AS builder
 
@@ -36,33 +36,35 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# We install gosu to drop privileges safely after fixing /tmp perms.
+# gosu lets us drop privileges after fixing /tmp perms
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates gosu \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy installed deps from builder
+# Copy installed deps from builder into runtime
 COPY --from=builder /install /usr/local
 
 # Copy application
 COPY app /app
 
-# Create non-root user for the app process
+# Create non-root user (we will drop to this user in entrypoint)
 RUN useradd --create-home --shell /usr/sbin/nologin appuser \
     && chown -R appuser:appuser /app
 
-# Entrypoint: fix permissions on mounted tmp dirs, then run gunicorn as appuser
+# Entrypoint: fix temp dirs permissions (important when /tmp is volume-mounted),
+# then run the command as appuser.
 RUN cat > /usr/local/bin/entrypoint.sh <<'EOF' \
   && chmod +x /usr/local/bin/entrypoint.sh
 #!/bin/sh
 set -eu
 
-# These dirs may be volume-mounted in ECS and come in root-owned with restrictive perms.
-# Make them usable for gunicorn tempfile usage.
+# Ensure temp dirs exist. In ECS with volume-mounted /tmp, permissions can be restrictive.
 mkdir -p /tmp /var/tmp /usr/tmp
+
+# Sticky-bit so any user can create temp files safely
 chmod 1777 /tmp /var/tmp /usr/tmp || true
 
-# Drop privileges and run the app as non-root
+# Drop privileges and run
 exec gosu appuser "$@"
 EOF
 
