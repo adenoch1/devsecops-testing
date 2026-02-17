@@ -137,7 +137,7 @@ jobs:
 
           # 1) If deploy tag already exists, fail fast (immutable repos cannot overwrite)
           if aws ecr describe-images --repository-name "${REPO}" --image-ids imageTag="${DEPLOY_TAG}" >/dev/null 2>&1; then
-            echo "::error:ECR tag '${DEPLOY_TAG}' already exists in '${REPO}' and tags are immutable. Choose a new deploy tag."
+            echo ":error:ECR tag '${DEPLOY_TAG}' already exists in '${REPO}' and tags are immutable. Choose a new deploy tag."
             exit 1
           fi
 
