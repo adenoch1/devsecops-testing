@@ -1,15 +1,3 @@
-############################################################
-# ECS MODULE - main.tf (FULL, updated for remaining Checkov)
-# Fixes:
-# - CKV2_AWS_61: add lifecycle configuration to waf_logs_access bucket
-# - CKV_AWS_145: encrypt waf_logs_access bucket with KMS by default
-#
-# Production fix for 503 / task crash loops:
-# - Keep readonlyRootFilesystem=true (security)
-# - Add ephemeral volume mounted to /tmp and /var/tmp (writable temp)
-# - Add TMPDIR=/tmp to reduce runtime surprises
-############################################################
-
 data "aws_region" "current" {}
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
@@ -20,7 +8,7 @@ locals {
   container_image = "${var.ecr_repository_url}:${var.container_image_tag}"
 }
 
-# --------------------------------
+# ----------------------------------
 # CloudWatch Logs (encrypted with KMS)
 # --------------------------------
 resource "aws_cloudwatch_log_group" "app" {
