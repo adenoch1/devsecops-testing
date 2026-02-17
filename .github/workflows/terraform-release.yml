@@ -115,8 +115,6 @@ jobs:
       tfvars_path: "infra/envs/dev/terraform.tfvars"
       dockerfile_path: "docker/Dockerfile"
       build_context: "."
-      # ECR tag immutability: re-runs of the same commit SHA cannot push the same tag.
-      # Use a unique, traceable tag per workflow run.
       image_tag: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   #######################################################
@@ -223,10 +221,9 @@ jobs:
             --output table || true
           exit 1
 
-
   #######################################################
   # DNS Smoke Test (non-blocking if FQDN isn't ready)
-  ######################################################
+  #######################################################
   dns_smoke:
     name: DNS Smoke Test (non-blocking)
     needs: deploy
@@ -345,7 +342,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          PREFIX="${{ env.WORKDIR }}"
           NAME_PREFIX="devsecops-flask-dev"
 
           echo "Searching for ALB(s) to disable deletion protection..."
@@ -366,38 +362,97 @@ jobs:
               --attributes Key=deletion_protection.enabled,Value=false
           done
 
-      - name: Wait for AWS to release public IP mappings (IGW safety)
+      - name: Destroy with IGW dependency retry (public IP mappings / NAT GW)
         shell: bash
         run: |
           set -euo pipefail
 
-          # Safely read vpc_id. If outputs/state are missing, skip the wait instead of crashing.
-          VPC_ID=""
-          if terraform output -raw vpc_id >/dev/null 2>&1; then
-            VPC_ID="$(terraform output -raw vpc_id 2>/dev/null || true)"
+          NAME_PREFIX="devsecops-flask-dev"
+
+          get_vpc_id() {
+            local vpc=""
+
+            # 1) Best: Terraform output (sanitize in case Terraform prints warnings to stdout)
+            if terraform output -no-color -raw vpc_id >/dev/null 2>&1; then
+              vpc="$(terraform output -no-color -raw vpc_id 2>/dev/null | tr -d '\r\n' | grep -Eo 'vpc-[0-9a-f]+' || true)"
+            fi
+
+            # 2) Fallback: Discover by VPC Name tag pattern (works even when outputs are missing)
+            if [ -z "${vpc}" ]; then
+              vpc="$(aws ec2 describe-vpcs \
+                --filters "Name=tag:Name,Values=*${NAME_PREFIX}*" \
+                --query "Vpcs[0].VpcId" \
+                --output text 2>/dev/null || true)"
+              if ! echo "${vpc}" | grep -Eq '^vpc-[0-9a-f]+'; then
+                vpc=""
+              fi
+            fi
+
+            echo "${vpc}"
+          }
+
+          wait_for_public_mappings_to_clear() {
+            local vpc_id="$1"
+            echo "Waiting for AWS to release public IP mappings in VPC: ${vpc_id}"
+
+            for i in {1..60}; do
+              # ENIs with public IP associations (instances, NAT GWs, etc.)
+              local eni_count
+              eni_count="$(aws ec2 describe-network-interfaces \
+                --filters "Name=vpc-id,Values=${vpc_id}" \
+                --query "length(NetworkInterfaces[?Association.PublicIp!=null])" \
+                --output text 2>/dev/null || echo "0")"
+
+              # NAT gateways that are not fully deleted yet
+              local nat_count
+              nat_count="$(aws ec2 describe-nat-gateways \
+                --filter "Name=vpc-id,Values=${vpc_id}" \
+                --query "length(NatGateways[?State!='deleted'])" \
+                --output text 2>/dev/null || echo "0")"
+
+              echo "Attempt ${i} — ENIs with PublicIp: ${eni_count} | NAT GWs not deleted: ${nat_count}"
+
+              if [ "${eni_count}" = "0" ] && [ "${nat_count}" = "0" ]; then
+                echo "Public mappings cleared ✅"
+                return 0
+              fi
+
+              sleep 15
+            done
+
+            echo "::warning::Timeout waiting for public mappings to clear. Proceeding anyway."
+            return 0
+          }
+
+          try_destroy() {
+            # Use low parallelism for more predictable teardown ordering (helps with ALB/NAT/IGW)
+            terraform destroy -auto-approve -parallelism=1
+          }
+
+          VPC_ID="$(get_vpc_id)"
+          if [ -n "${VPC_ID}" ]; then
+            echo "Detected VPC: ${VPC_ID}"
+          else
+            echo "::warning::Could not determine VPC ID (no outputs + no matching VPC tag:Name). Will still attempt destroy."
           fi
 
-          if [ -z "${VPC_ID}" ] || [ "${VPC_ID}" = "null" ]; then
-            echo "::warning::VPC ID not found in terraform outputs (state missing or no outputs). Skipping wait."
+          echo "Running terraform destroy (attempt 1)..."
+          set +e
+          try_destroy
+          rc=$?
+          set -e
+
+          if [ "$rc" -eq 0 ]; then
+            echo "Destroy completed ✅"
             exit 0
           fi
 
-          echo "Waiting for AWS cleanup in VPC: ${VPC_ID}"
+          echo "::warning::Destroy attempt 1 failed (exit ${rc}). Checking for IGW dependency / AWS eventual-consistency delays..."
 
-          for i in {1..40}; do
-            COUNT="$(aws ec2 describe-network-interfaces \
-              --filters Name=vpc-id,Values="${VPC_ID}" \
-              --query "length(NetworkInterfaces[?Association.PublicIp!=null])" \
-              --output text)"
-            echo "Attempt $i — public ENIs with public IPs: $COUNT"
-            if [ "$COUNT" = "0" ]; then
-              echo "AWS cleanup complete ✅"
-              exit 0
-            fi
-            sleep 15
-          done
+          # If we can detect the VPC, wait for NAT GW/ENI public IP mappings to clear, then retry once.
+          if [ -n "${VPC_ID}" ]; then
+            wait_for_public_mappings_to_clear "${VPC_ID}"
+          fi
 
-          echo "::warning::AWS cleanup timeout reached, proceeding anyway"
-
-      - name: Terraform destroy
-        run: terraform destroy -auto-approve -parallelism=1
+          echo "Running terraform destroy (attempt 2)..."
+          try_destroy
