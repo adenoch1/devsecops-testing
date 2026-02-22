@@ -128,3 +128,8 @@ variable "lifecycle_glacier_days" {
   type        = number
   default     = 30
 }
+
+variable "terraform_role_name" {
+  type        = string
+  description = "Name of the IAM role used by Terraform (e.g., GitHub Actions OIDC deploy role)"
+}

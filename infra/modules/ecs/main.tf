@@ -2,6 +2,10 @@ data "aws_region" "current" {}
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 
+data "aws_iam_role" "terraform" {
+  name = var.terraform_role_name
+}
+
 
 locals {
   app_port        = var.app_port
@@ -447,13 +451,11 @@ resource "aws_kms_key" "waf_logs" {
         Resource  = "*"
       },
 
-      # ✅ Allow Terraform (GitHub Actions role) to manage/use this key during provisioning
+      # Allow Terraform (GitHub Actions role) to manage/use this key during provisioning
       {
-        Sid    = "AllowTerraformRoleUseOfKey"
-        Effect = "Allow"
-        Principal = {
-          AWS = "arn:aws:iam::476532114555:role/GitHubActions-Terraform-DevSecOps-Role"
-        }
+        Sid       = "AllowTerraformRoleUseOfKey"
+        Effect    = "Allow"
+        Principal = { AWS = data.aws_iam_role.terraform.arn }
         Action = [
           "kms:Encrypt",
           "kms:Decrypt",

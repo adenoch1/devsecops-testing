@@ -295,7 +295,7 @@ jobs:
             code="$(curl -k -s -o /dev/null -w "%{http_code}" "$URL" || true)"
             echo "HTTP status: $code"
             if [[ "$code" =~ ^2[0-9][0-9]$ ]] || [[ "$code" =~ ^3[0-9][0-9]$ ]]; then
-              echo "Smoke test passed ✅"
+              echo "Smoke test passed"
               exit 0
             fi
             sleep 10
@@ -304,7 +304,7 @@ jobs:
           echo "::warning::HTTPS smoke test did not pass yet. Check DNS/CNAME/TLS/ALB target health."
           exit 0
 
-  ########################################################
+  #########################################################
   # Destroy (gated) — appears after deploy/smoke, waits for approval
   #########################################################
   destroy:

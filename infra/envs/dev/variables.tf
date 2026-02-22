@@ -107,3 +107,8 @@ variable "health_check_path" {
   type        = string
   default     = "/health"
 }
+
+variable "terraform_role_name" {
+  type        = string
+  description = "Terraform deploy role name"
+}
