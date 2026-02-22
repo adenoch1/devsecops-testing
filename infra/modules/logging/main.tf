@@ -1,5 +1,6 @@
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
+data "aws_partition" "current" {}
 
 locals {
   account_id = data.aws_caller_identity.current.account_id
@@ -312,7 +313,9 @@ resource "aws_s3_bucket_public_access_block" "alb_logs" {
 
 resource "aws_s3_bucket_ownership_controls" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
-  rule { object_ownership = "BucketOwnerEnforced" }
+  rule {
+    object_ownership = "BucketOwnerPreferred"
+  }
 }
 
 resource "aws_s3_bucket_versioning" "alb_logs" {
@@ -332,11 +335,13 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
 }
 
 # Deny HTTP (must use HTTPS)
-resource "aws_s3_bucket_policy" "alb_logs_https" {
+resource "aws_s3_bucket_policy" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
+
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
+      # ✅ Force HTTPS
       {
         Sid       = "DenyInsecureTransport"
         Effect    = "Deny"
@@ -346,33 +351,40 @@ resource "aws_s3_bucket_policy" "alb_logs_https" {
           aws_s3_bucket.alb_logs.arn,
           "${aws_s3_bucket.alb_logs.arn}/*"
         ]
-        Condition = { Bool = { "aws:SecureTransport" = "false" } }
+        Condition = {
+          Bool = { "aws:SecureTransport" = "false" }
+        }
       },
 
-      # Allow ALB/ELB log delivery to write access logs
+      # ✅ Allow ALB log delivery service to write logs
       {
-        Sid       = "AllowLogDeliveryPutObject"
+        Sid       = "AllowLogDeliveryWrite"
         Effect    = "Allow"
         Principal = { Service = "delivery.logs.amazonaws.com" }
         Action    = "s3:PutObject"
-        Resource  = "${aws_s3_bucket.alb_logs.arn}/${local.alb_log_objects_prefix}*"
+        Resource  = "${aws_s3_bucket.alb_logs.arn}/*"
         Condition = {
           StringEquals = {
-            "s3:x-amz-acl"      = "bucket-owner-full-control"
-            "aws:SourceAccount" = local.account_id
+            "s3:x-amz-acl"      = "bucket-owner-full-control",
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
           }
         }
       },
 
-      # Allow log delivery to read bucket ACL (required by AWS log delivery)
+      # ✅ Allow ALB log delivery service to read bucket ACL
       {
-        Sid       = "AllowLogDeliveryGetBucketAcl"
+        Sid       = "AllowLogDeliveryAclCheck"
         Effect    = "Allow"
         Principal = { Service = "delivery.logs.amazonaws.com" }
-        Action    = "s3:GetBucketAcl"
-        Resource  = aws_s3_bucket.alb_logs.arn
+        Action = [
+          "s3:GetBucketAcl",
+          "s3:ListBucket"
+        ]
+        Resource = aws_s3_bucket.alb_logs.arn
         Condition = {
-          StringEquals = { "aws:SourceAccount" = local.account_id }
+          StringEquals = {
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+          }
         }
       }
     ]
