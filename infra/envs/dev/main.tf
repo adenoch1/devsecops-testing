@@ -83,6 +83,7 @@ module "ecs" {
 
   ecs_task_execution_role_arn = module.iam.ecs_task_execution_role_arn
   ecs_task_role_arn           = module.iam.ecs_task_role_arn
+  terraform_role_name         = var.terraform_role_name
 
   app_port            = var.app_port
   container_image_tag = var.container_image_tag
