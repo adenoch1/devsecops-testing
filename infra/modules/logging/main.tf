@@ -4,7 +4,7 @@ data "aws_partition" "current" {}
 
 locals {
   account_id = data.aws_caller_identity.current.account_id
-  region     = data.aws_region.current.id
+  region     = data.aws_region.current.name
 
   # S3 buckets (names must be globally unique)
   alb_logs_bucket_name           = "${var.name_prefix}-alb-logs-${local.account_id}"
@@ -32,7 +32,7 @@ resource "aws_kms_key" "alb_logs" {
       {
         Sid       = "EnableRootPermissions"
         Effect    = "Allow"
-        Principal = { AWS = "arn:aws:iam::${local.account_id}:root" }
+        Principal = { AWS = "arn:${data.aws_partition.current.partition}:iam::${local.account_id}:root" }
         Action    = "kms:*"
         Resource  = "*"
       },
@@ -90,16 +90,38 @@ resource "aws_kms_key" "cloudwatch_logs" {
   deletion_window_in_days = 10
   enable_key_rotation     = true
 
-  # Root only is sufficient for CW Logs KMS usage in this project.
+  # IMPORTANT: CloudWatch Logs must be allowed to use the key in this region,
+  # otherwise CreateLogGroup fails with AccessDeniedException.
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
+      # Root admin
       {
         Sid       = "EnableRootPermissions"
         Effect    = "Allow"
-        Principal = { AWS = "arn:aws:iam::${local.account_id}:root" }
+        Principal = { AWS = "arn:${data.aws_partition.current.partition}:iam::${local.account_id}:root" }
         Action    = "kms:*"
         Resource  = "*"
+      },
+
+      # Allow CloudWatch Logs service in this region to use the key
+      {
+        Sid       = "AllowCloudWatchLogsUse"
+        Effect    = "Allow"
+        Principal = { Service = "logs.${local.region}.amazonaws.com" }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "aws:SourceAccount" = local.account_id
+          }
+        }
       }
     ]
   })
@@ -183,6 +205,7 @@ resource "aws_s3_bucket_policy" "ultimate_sink_https" {
       }
     ]
   })
+  depends_on = [aws_s3_bucket_public_access_block.ultimate_sink, aws_s3_bucket_ownership_controls.ultimate_sink]
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "ultimate_sink" {
@@ -263,6 +286,7 @@ resource "aws_s3_bucket_policy" "server_access_logs_https" {
       }
     ]
   })
+  depends_on = [aws_s3_bucket_public_access_block.server_access_logs, aws_s3_bucket_ownership_controls.server_access_logs]
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "server_access_logs" {
@@ -289,6 +313,12 @@ resource "aws_s3_bucket_logging" "server_access_logs" {
   bucket        = aws_s3_bucket.server_access_logs.id
   target_bucket = aws_s3_bucket.ultimate_sink.id
   target_prefix = "server-access-logs/"
+
+  depends_on = [
+    aws_s3_bucket_policy.ultimate_sink_https,
+    aws_s3_bucket_ownership_controls.server_access_logs,
+    aws_s3_bucket_ownership_controls.ultimate_sink
+  ]
 }
 
 # ---- alb_logs bucket (destination for ALB access logs) ----
@@ -311,9 +341,11 @@ resource "aws_s3_bucket_public_access_block" "alb_logs" {
   restrict_public_buckets = true
 }
 
+# IMPORTANT: For ALB log delivery, ACLs are used ("bucket-owner-full-control").
+# BucketOwnerEnforced disables ACLs and breaks ALB log delivery.
 resource "aws_s3_bucket_ownership_controls" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
-  rule { object_ownership = "BucketOwnerEnforced" }
+  rule { object_ownership = "BucketOwnerPreferred" }
 }
 
 resource "aws_s3_bucket_versioning" "alb_logs" {
@@ -332,14 +364,14 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
   }
 }
 
-# Deny HTTP (must use HTTPS)
+# Deny HTTP (must use HTTPS) + allow ALB log delivery
 resource "aws_s3_bucket_policy" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      # ✅ Force HTTPS
+      # Force HTTPS
       {
         Sid       = "DenyInsecureTransport"
         Effect    = "Deny"
@@ -354,7 +386,7 @@ resource "aws_s3_bucket_policy" "alb_logs" {
         }
       },
 
-      # ✅ Allow ALB log delivery service to write logs
+      # Allow ALB log delivery service to write logs
       {
         Sid       = "AllowLogDeliveryWrite"
         Effect    = "Allow"
@@ -364,12 +396,12 @@ resource "aws_s3_bucket_policy" "alb_logs" {
         Condition = {
           StringEquals = {
             "s3:x-amz-acl"      = "bucket-owner-full-control",
-            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+            "aws:SourceAccount" = local.account_id
           }
         }
       },
 
-      # ✅ Allow ALB log delivery service to read bucket ACL
+      # Allow ALB log delivery service to read bucket ACL / list bucket
       {
         Sid       = "AllowLogDeliveryAclCheck"
         Effect    = "Allow"
@@ -381,12 +413,17 @@ resource "aws_s3_bucket_policy" "alb_logs" {
         Resource = aws_s3_bucket.alb_logs.arn
         Condition = {
           StringEquals = {
-            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+            "aws:SourceAccount" = local.account_id
           }
         }
       }
     ]
   })
+
+  depends_on = [
+    aws_s3_bucket_public_access_block.alb_logs,
+    aws_s3_bucket_ownership_controls.alb_logs
+  ]
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "alb_logs" {
@@ -413,4 +450,10 @@ resource "aws_s3_bucket_logging" "alb_logs" {
   bucket        = aws_s3_bucket.alb_logs.id
   target_bucket = aws_s3_bucket.server_access_logs.id
   target_prefix = "alb-logs/"
+
+  depends_on = [
+    aws_s3_bucket_policy.server_access_logs_https,
+    aws_s3_bucket_ownership_controls.alb_logs,
+    aws_s3_bucket_ownership_controls.server_access_logs
+  ]
 }
