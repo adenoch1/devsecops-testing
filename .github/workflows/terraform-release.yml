@@ -295,7 +295,7 @@ jobs:
             code="$(curl -k -s -o /dev/null -w "%{http_code}" "$URL" || true)"
             echo "HTTP status: $code"
             if [[ "$code" =~ ^2[0-9][0-9]$ ]] || [[ "$code" =~ ^3[0-9][0-9]$ ]]; then
-              echo "Smoke test passed ✅"
+              echo "Smoke test passed"
               exit 0
             fi
             sleep 10

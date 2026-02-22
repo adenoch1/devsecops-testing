@@ -453,8 +453,8 @@ resource "aws_kms_key" "waf_logs" {
 
       # Allow Terraform (GitHub Actions role) to manage/use this key during provisioning
       {
-        Sid    = "AllowTerraformRoleUseOfKey"
-        Effect = "Allow"
+        Sid       = "AllowTerraformRoleUseOfKey"
+        Effect    = "Allow"
         Principal = { AWS = data.aws_iam_role.terraform.arn }
         Action = [
           "kms:Encrypt",
