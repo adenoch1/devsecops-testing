@@ -471,11 +471,9 @@ resource "aws_kms_key" "waf_logs" {
         }
       },
       {
-        Sid    = "AllowTerraformRoleCreateGrant"
-        Effect = "Allow"
-        Principal = {
-          AWS = "arn:aws:iam::476532114555:role/GitHubActions-Terraform-DevSecOps-Role"
-        }
+        Sid       = "AllowTerraformRoleCreateGrant"
+        Effect    = "Allow"
+        Principal = { AWS = data.aws_iam_role.terraform.arn }
         Action = [
           "kms:CreateGrant",
           "kms:ListGrants",
