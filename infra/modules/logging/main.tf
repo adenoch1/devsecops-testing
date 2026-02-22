@@ -51,7 +51,8 @@ resource "aws_kms_key" "alb_logs" {
         Resource = "*"
         Condition = {
           StringEquals = {
-            "aws:SourceAccount" = local.account_id
+            "aws:SourceAccount" = local.account_id,
+            "kms:ViaService"    = "s3.${local.region}.amazonaws.com"
           }
         }
       }
@@ -332,15 +333,16 @@ resource "aws_s3_bucket_versioning" "alb_logs" {
   versioning_configuration { status = "Enabled" }
 }
 
-# IMPORTANT:
-# AWS docs for ALB access logs state the supported default encryption option is SSE-S3.
-# We keep the bucket encrypted (SSE-S3) while still enforcing HTTPS and blocking public access.
+# Default encryption for the ALB access logs bucket (SSE-KMS).
+# This is required to pass CKV_AWS_145 (KMS by default) while keeping the bucket private and HTTPS-only.
 resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.alb_logs.arn
     }
+    bucket_key_enabled = true
   }
 }
 
@@ -377,6 +379,20 @@ resource "aws_s3_bucket_policy" "alb_logs" {
           "${aws_s3_bucket.alb_logs.arn}/${local.alb_log_objects_prefix}*",
           "${aws_s3_bucket.alb_logs.arn}/*/${local.alb_log_objects_prefix}*"
         ]
+      }
+
+      ,
+      {
+        Sid       = "AllowALBLogDeliveryAclCheck"
+        Effect    = "Allow"
+        Principal = { Service = "logdelivery.elasticloadbalancing.amazonaws.com" }
+        Action    = ["s3:GetBucketAcl", "s3:ListBucket"]
+        Resource  = aws_s3_bucket.alb_logs.arn
+        Condition = {
+          StringEquals = {
+            "aws:SourceAccount" = local.account_id
+          }
+        }
       }
     ]
   })
