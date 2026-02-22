@@ -11,8 +11,7 @@ locals {
   server_access_logs_bucket_name = "${var.name_prefix}-s3-server-access-logs-${local.account_id}"
   ultimate_sink_bucket_name      = "${var.name_prefix}-s3-ultimate-sink-${local.account_id}"
 
-  # Standard S3 access log delivery prefix
-  # (ALB access logs will typically write under AWSLogs/<account_id>/)
+  # Standard ELB access log delivery prefix used by AWS
   alb_log_objects_prefix = "AWSLogs/${local.account_id}/"
 }
 
@@ -21,7 +20,7 @@ locals {
 # ------------------------------------------------------------
 
 resource "aws_kms_key" "alb_logs" {
-  description             = "KMS key for S3 ALB access logs (SSE-KMS)"
+  description             = "KMS key used for S3 server access logs / sink buckets (SSE-KMS)"
   deletion_window_in_days = 10
   enable_key_rotation     = true
 
@@ -37,7 +36,7 @@ resource "aws_kms_key" "alb_logs" {
         Resource  = "*"
       },
 
-      # Allow S3 to use the key for objects in these buckets (SSE-KMS)
+      # Allow S3 to use the key (SSE-KMS for buckets in this account)
       {
         Sid       = "AllowS3UseForBuckets"
         Effect    = "Allow"
@@ -55,33 +54,15 @@ resource "aws_kms_key" "alb_logs" {
             "aws:SourceAccount" = local.account_id
           }
         }
-      },
-
-      # Allow AWS log delivery service to write encrypted objects (ALB/ELB access logs)
-      {
-        Sid       = "AllowLogDeliveryUseOfKey"
-        Effect    = "Allow"
-        Principal = { Service = "delivery.logs.amazonaws.com" }
-        Action = [
-          "kms:Encrypt",
-          "kms:GenerateDataKey*",
-          "kms:DescribeKey"
-        ]
-        Resource = "*"
-        Condition = {
-          StringEquals = {
-            "aws:SourceAccount" = local.account_id
-          }
-        }
       }
     ]
   })
 
-  tags = merge(var.tags, { Name = "${var.name_prefix}-alb-logs-kms" })
+  tags = merge(var.tags, { Name = "${var.name_prefix}-s3-logs-kms" })
 }
 
 resource "aws_kms_alias" "alb_logs" {
-  name          = "alias/${var.name_prefix}-alb-logs"
+  name          = "alias/${var.name_prefix}-s3-logs"
   target_key_id = aws_kms_key.alb_logs.key_id
 }
 
@@ -90,8 +71,7 @@ resource "aws_kms_key" "cloudwatch_logs" {
   deletion_window_in_days = 10
   enable_key_rotation     = true
 
-  # IMPORTANT: CloudWatch Logs must be allowed to use the key in this region,
-  # otherwise CreateLogGroup fails with AccessDeniedException.
+  # CloudWatch Logs must be allowed to use the key in this region.
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -341,11 +321,10 @@ resource "aws_s3_bucket_public_access_block" "alb_logs" {
   restrict_public_buckets = true
 }
 
-# IMPORTANT: For ALB log delivery, ACLs are used ("bucket-owner-full-control").
-# BucketOwnerEnforced disables ACLs and breaks ALB log delivery.
+# ✅ Pass CKV2_AWS_65: disable ACLs.
 resource "aws_s3_bucket_ownership_controls" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
-  rule { object_ownership = "BucketOwnerPreferred" }
+  rule { object_ownership = "BucketOwnerEnforced" }
 }
 
 resource "aws_s3_bucket_versioning" "alb_logs" {
@@ -353,18 +332,19 @@ resource "aws_s3_bucket_versioning" "alb_logs" {
   versioning_configuration { status = "Enabled" }
 }
 
+# IMPORTANT:
+# AWS docs for ALB access logs state the supported default encryption option is SSE-S3.
+# We keep the bucket encrypted (SSE-S3) while still enforcing HTTPS and blocking public access.
 resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm     = "aws:kms"
-      kms_master_key_id = aws_kms_key.alb_logs.arn
+      sse_algorithm = "AES256"
     }
-    bucket_key_enabled = true
   }
 }
 
-# Deny HTTP (must use HTTPS) + allow ALB log delivery
+# Deny HTTP (must use HTTPS) + allow ALB access log delivery (new policy)
 resource "aws_s3_bucket_policy" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
 
@@ -386,36 +366,17 @@ resource "aws_s3_bucket_policy" "alb_logs" {
         }
       },
 
-      # Allow ALB log delivery service to write logs
+      # Allow ELB log delivery service to write logs.
+      # Resource includes the AWSLogs/<account-id>/ prefix (and optionally an extra prefix before it).
       {
-        Sid       = "AllowLogDeliveryWrite"
+        Sid       = "AllowALBLogDeliveryWrite"
         Effect    = "Allow"
-        Principal = { Service = "delivery.logs.amazonaws.com" }
+        Principal = { Service = "logdelivery.elasticloadbalancing.amazonaws.com" }
         Action    = "s3:PutObject"
-        Resource  = "${aws_s3_bucket.alb_logs.arn}/*"
-        Condition = {
-          StringEquals = {
-            "s3:x-amz-acl"      = "bucket-owner-full-control",
-            "aws:SourceAccount" = local.account_id
-          }
-        }
-      },
-
-      # Allow ALB log delivery service to read bucket ACL / list bucket
-      {
-        Sid       = "AllowLogDeliveryAclCheck"
-        Effect    = "Allow"
-        Principal = { Service = "delivery.logs.amazonaws.com" }
-        Action = [
-          "s3:GetBucketAcl",
-          "s3:ListBucket"
+        Resource = [
+          "${aws_s3_bucket.alb_logs.arn}/${local.alb_log_objects_prefix}*",
+          "${aws_s3_bucket.alb_logs.arn}/*/${local.alb_log_objects_prefix}*"
         ]
-        Resource = aws_s3_bucket.alb_logs.arn
-        Condition = {
-          StringEquals = {
-            "aws:SourceAccount" = local.account_id
-          }
-        }
       }
     ]
   })
