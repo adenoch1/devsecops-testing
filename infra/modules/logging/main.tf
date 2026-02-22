@@ -379,7 +379,7 @@ resource "aws_s3_bucket_policy" "alb_logs" {
           "${aws_s3_bucket.alb_logs.arn}/*/${local.alb_log_objects_prefix}*"
         ]
       }
-    
+
       ,
       {
         Sid       = "AllowALBLogDeliveryAclCheck"
@@ -393,7 +393,7 @@ resource "aws_s3_bucket_policy" "alb_logs" {
           }
         }
       }
-]
+    ]
   })
 
   depends_on = [
