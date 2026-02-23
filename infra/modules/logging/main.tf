@@ -15,9 +15,9 @@ locals {
   alb_log_objects_prefix = "AWSLogs/${local.account_id}/"
 }
 
-# ------------------------------------------------------------
+# -----------------------------------------------------------
 # KMS keys
-# ------------------------------------------------------------
+# -----------------------------------------------------------
 
 resource "aws_kms_key" "alb_logs" {
   description             = "KMS key used for S3 server access logs / sink buckets (SSE-KMS)"
