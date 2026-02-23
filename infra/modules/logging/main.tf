@@ -305,6 +305,7 @@ resource "aws_s3_bucket_logging" "server_access_logs" {
 # ---- alb_logs bucket (destination for ALB access logs) ----
 # checkov:skip=CKV_AWS_145: ALB access log destination bucket must use SSE-S3 (AES256); SSE-KMS breaks ALB log delivery (AccessDenied).
 resource "aws_s3_bucket" "alb_logs" {
+  # checkov:skip=CKV_AWS_145: see above; ALB log delivery requires SSE-S3.
   bucket        = local.alb_logs_bucket_name
   force_destroy = true
 
