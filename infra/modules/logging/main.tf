@@ -63,7 +63,7 @@ resource "aws_kms_key" "alb_logs" {
 }
 
 resource "aws_kms_alias" "alb_logs" {
-  name          = "alias/${var.name_prefix}-s3-logs"
+  name          = "alias/${var.name_prefix}-alb-logs"
   target_key_id = aws_kms_key.alb_logs.key_id
 }
 
