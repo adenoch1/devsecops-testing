@@ -303,8 +303,9 @@ resource "aws_s3_bucket_logging" "server_access_logs" {
 }
 
 # ---- alb_logs bucket (destination for ALB access logs) ----
-
+# checkov:skip=CKV_AWS_145: ALB access log destination bucket must use SSE-S3 (AES256); SSE-KMS breaks ALB log delivery (AccessDenied).
 resource "aws_s3_bucket" "alb_logs" {
+  # checkov:skip=CKV_AWS_145: see above; ALB log delivery requires SSE-S3.
   bucket        = local.alb_logs_bucket_name
   force_destroy = true
 
@@ -335,17 +336,16 @@ resource "aws_s3_bucket_versioning" "alb_logs" {
 
 # Default encryption for the ALB access logs bucket (SSE-KMS).
 # This is required to pass CKV_AWS_145 (KMS by default) while keeping the bucket private and HTTPS-only.
+# Default encryption for the ALB access logs bucket.
+#checkov:skip=CKV_AWS_145:ALB access logs support only SSE-S3 (AWS docs). Using SSE-S3 avoids log delivery failures while bucket remains private and HTTPS-only.
 resource "aws_s3_bucket_server_side_encryption_configuration" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm     = "aws:kms"
-      kms_master_key_id = aws_kms_key.alb_logs.arn
+      sse_algorithm = "AES256"
     }
-    bucket_key_enabled = true
   }
 }
-
 # Deny HTTP (must use HTTPS) + allow ALB access log delivery (new policy)
 resource "aws_s3_bucket_policy" "alb_logs" {
   bucket = aws_s3_bucket.alb_logs.id
